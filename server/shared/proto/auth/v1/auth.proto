@@ -1,0 +1,274 @@
+syntax = "proto3";
+
+package auth.v1;
+
+option go_package = "github.com/listen-stream/server/shared/proto/auth/v1;authv1";
+
+import "google/protobuf/timestamp.proto";
+
+// AuthService provides authentication and token management for the Listen Stream platform.
+//
+// All RPCs require proper authentication except for the login flow.
+// Performance target: Token verification P99 < 5ms
+service AuthService {
+  // VerifyToken validates a JWT access token and returns the associated user information.
+  //
+  // This RPC is frequently called by proxy-svc for request authentication.
+  // Expected QPS: 5000+
+  rpc VerifyToken(VerifyTokenRequest) returns (VerifyTokenResponse);
+  
+  // RefreshToken issues a new access token using a valid refresh token.
+  //
+  // This extends the user's session without requiring re-authentication.
+  rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+  
+  // RevokeToken invalidates a specific access token immediately.
+  //
+  // Useful for implementing logout functionality or security incidents.
+  rpc RevokeToken(RevokeTokenRequest) returns (RevokeTokenResponse);
+  
+  // RevokeDevice removes a device and invalidates all its tokens.
+  //
+  // This implements the "kick device" functionality for security management.
+  rpc RevokeDevice(RevokeDeviceRequest) returns (RevokeDeviceResponse);
+  
+  // GetUserDevices lists all active devices for a user.
+  //
+  // Used by clients to display device management UI.
+  rpc GetUserDevices(GetUserDevicesRequest) returns (GetUserDevicesResponse);
+  
+  // ValidateTokenVersion checks if a token's version matches the current user token version.
+  //
+  // This enables global token revocation when the JWT secret is rotated.
+  rpc ValidateTokenVersion(ValidateTokenVersionRequest) returns (ValidateTokenVersionResponse);
+}
+
+// VerifyTokenRequest contains the token to be verified.
+message VerifyTokenRequest {
+  // The JWT access token in the format: "eyJhbGc..."
+  string access_token = 1;
+  
+  // Optional client IP address for strict mode validation.
+  // If provided and strict mode is enabled, the token's bound IP must match.
+  string client_ip = 2;
+  
+  // Optional device fingerprint for anomaly detection.
+  // Significant changes in fingerprint may indicate account compromise.
+  string device_fingerprint = 3;
+}
+
+// VerifyTokenResponse contains the validated user information.
+message VerifyTokenResponse {
+  // Whether the token is valid
+  bool valid = 1;
+  
+  // User information (only present if valid=true)
+  User user = 2;
+  
+  // Device information
+  Device device = 3;
+  
+  // Failure reason (only present if valid=false)
+  string error_message = 4;
+  
+  // Error code for client handling
+  ErrorCode error_code = 5;
+}
+
+// RefreshTokenRequest contains the refresh token.
+message RefreshTokenRequest {
+  // The refresh token
+  string refresh_token = 1;
+  
+  // Device ID that owns this refresh token
+  string device_id = 2;
+}
+
+// RefreshTokenResponse contains the new tokens.
+message RefreshTokenResponse {
+  // New access token (30 min TTL)
+  string access_token = 1;
+  
+  // New refresh token (30 day TTL)
+  string refresh_token = 2;
+  
+  // Token expiration time
+  google.protobuf.Timestamp expires_at = 3;
+}
+
+// RevokeTokenRequest specifies which token to revoke.
+message RevokeTokenRequest {
+  // The access token to revoke
+  string access_token = 1;
+  
+  // Reason for revocation (for audit logs)
+  string reason = 2;
+}
+
+// RevokeTokenResponse confirms the revocation.
+message RevokeTokenResponse {
+  // Whether the revocation was successful
+  bool success = 1;
+}
+
+// RevokeDeviceRequest specifies which device to remove.
+message RevokeDeviceRequest {
+  // User ID who owns the device
+  string user_id = 1;
+  
+  // Device ID to revoke
+  string device_id = 2;
+  
+  // Reason for revocation (for audit logs)
+  string reason = 3;
+}
+
+// RevokeDeviceResponse confirms the device removal.
+message RevokeDeviceResponse {
+  // Whether the revocation was successful
+  bool success = 1;
+  
+  // Number of tokens invalidated
+  int32 tokens_revoked = 2;
+}
+
+// GetUserDevicesRequest specifies which user's devices to fetch.
+message GetUserDevicesRequest {
+  // User ID
+  string user_id = 1;
+}
+
+// GetUserDevicesResponse contains the list of devices.
+message GetUserDevicesResponse {
+  // List of active devices
+  repeated Device devices = 1;
+}
+
+// ValidateTokenVersionRequest checks token version validity.
+message ValidateTokenVersionRequest {
+  // User ID from the token
+  string user_id = 1;
+  
+  // Token version from the token claims
+  int32 token_version = 2;
+}
+
+// ValidateTokenVersionResponse indicates version validity.
+message ValidateTokenVersionResponse {
+  // Whether the token version is valid
+  bool valid = 1;
+  
+  // Current token version for the user
+  int32 current_version = 2;
+}
+
+// User represents a user account.
+message User {
+  // Unique user ID (UUID)
+  string id = 1;
+  
+  // Phone number (masked for privacy: 138****5678)
+  string phone = 2;
+  
+  // User role
+  UserRole role = 3;
+  
+  // Whether the account is disabled
+  bool disabled = 4;
+  
+  // Current token version (incremented on global revocation)
+  int32 token_version = 5;
+  
+  // Account creation time
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// Device represents a user's device session.
+message Device {
+  // Unique device ID (UUID)
+  string id = 1;
+  
+  // User ID who owns this device
+  string user_id = 2;
+  
+  // Client-generated device identifier
+  string device_id = 3;
+  
+  // Platform type
+  Platform platform = 4;
+  
+  // Device fingerprint (for anomaly detection)
+  string fingerprint = 5;
+  
+  // Bound IP address (for strict mode)
+  string ip_address = 6;
+  
+  // Last activity timestamp
+  google.protobuf.Timestamp last_active = 7;
+  
+  // Device creation time
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// UserRole defines user permission levels.
+enum UserRole {
+  // Default role (should not be used)
+  USER_ROLE_UNSPECIFIED = 0;
+  
+  // Regular user
+  USER_ROLE_USER = 1;
+  
+  // Administrator
+  USER_ROLE_ADMIN = 2;
+  
+  // Super administrator
+  USER_ROLE_SUPER_ADMIN = 3;
+}
+
+// Platform defines device platform types.
+enum Platform {
+  // Default platform (should not be used)
+  PLATFORM_UNSPECIFIED = 0;
+  
+  // iOS mobile app
+  PLATFORM_IOS = 1;
+  
+  // Android mobile app
+  PLATFORM_ANDROID = 2;
+  
+  // Web browser
+  PLATFORM_WEB = 3;
+  
+  // Desktop application
+  PLATFORM_DESKTOP = 4;
+  
+  // TV application
+  PLATFORM_TV = 5;
+}
+
+// ErrorCode defines authentication error codes.
+enum ErrorCode {
+  // No error
+  ERROR_CODE_UNSPECIFIED = 0;
+  
+  // Token is expired
+  ERROR_CODE_TOKEN_EXPIRED = 1;
+  
+  // Token signature is invalid
+  ERROR_CODE_INVALID_SIGNATURE = 2;
+  
+  // Token version mismatch (global revocation)
+  ERROR_CODE_VERSION_MISMATCH = 3;
+  
+  // User account is disabled
+  ERROR_CODE_USER_DISABLED = 4;
+  
+  // IP address mismatch (strict mode)
+  ERROR_CODE_IP_MISMATCH = 5;
+  
+  // Device fingerprint anomaly detected
+  ERROR_CODE_FINGERPRINT_ANOMALY = 6;
+  
+  // Refresh token not found or expired
+  ERROR_CODE_REFRESH_TOKEN_INVALID = 7;
+}

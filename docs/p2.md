@@ -1,0 +1,2803 @@
+# Listen Stream 项目全面分析报告
+
+> **分析日期**: 2026-02-23  
+> **工作区**: `/Users/aji/listen-stream`
+
+---
+
+## 目录
+1. [项目识别](#1-项目识别)
+2. [架构分析](#2-架构分析)
+3. [改进建议](#3-改进建议)
+4. [边界与安全案例](#4-边界与安全案例)
+5. [技术债务清单](#5-技术债务清单)
+
+---
+
+## 1. 项目识别
+
+### 1.1 listen_stream_server (Go 后端服务集群)
+
+#### 技术栈
+- **语言**: Go 1.23.0
+- **Web 框架**: Gin 1.10.0
+- **数据库**: PostgreSQL 15 (pgx/v5)
+- **缓存**: Redis 7 (go-redis/v9)
+- **认证**: JWT (golang-jwt/v5)
+- **日志**: zap 1.27.0
+- **部署**: Docker Compose
+
+#### 架构组成（4个微服务）
+
+##### A. auth-svc (端口 8001)
+**核心功能**:
+- 手机号 + 短信验证码登录
+- JWT 签发 (Access Token + Refresh Token)
+- 设备管理 (最多5台设备)
+- Token 刷新和撤销
+
+**主要依赖**:
+- gin-gonic/gin (HTTP Server)
+- golang-jwt/jwt/v5 (JWT)
+- jackc/pgx/v5 (PostgreSQL)
+- redis/go-redis/v9 (缓存 + RT存储)
+
+**目录结构**:
+```
+auth-svc/
+├── cmd/server/main.go          # 入口
+├── internal/
+│   ├── handler/                # HTTP handlers (login, refresh, logout)
+│   ├── middleware/             # JWT验证中间件
+│   ├── repo/                   # 数据访问层 (sqlc生成)
+│   └── service/                # 业务逻辑 (JWTService, SMSService)
+└── go.mod
+```
+
+##### B. proxy-svc (端口 8002)
+**核心功能**:
+- 反向代理第三方音乐 API (QQ Music)
+- Redis 缓存响应 (可配置TTL)
+- JWT 认证 (轻量级，无DB查询)
+- Fallback 机制 (QQ Music → Joox)
+- Cookie/API Key 配置化管理
+
+**路由分类**:
+```
+/health                         # 健康检查
+/auth/*                         # 反向代理 → auth-svc
+/user/*                         # 反向代理 → auth-svc
+/api/recommend/*                # 推荐 (banner, playlist, songs, albums)
+/api/playlist/*                 # 歌单 (category, detail)
+/api/artist/*                   # 歌手 (list, detail, songs, albums, mvs)
+/api/ranking/*                  # 排行榜
+/api/radio/*                    # 电台
+/api/mv/*                       # MV
+/api/album/*                    # 专辑
+/api/search/*                   # 搜索 (songs, artists, albums, mvs)
+/api/lyric/*                    # 歌词
+/api/song/*                     # 歌曲详情 + URL (带Fallback)
+```
+
+**缓存策略**:
+| 路径 | TTL | 说明 |
+|------|-----|------|
+| `/recommend/banner` | 30分钟 | 轮播图变化不频繁 |
+| `/playlist/detail` | 6小时 | 歌单内容相对稳定 |
+| `/artist/detail` | 12小时 | 歌手信息很少变化 |
+| `/song/url` | 0 (无缓存) | 播放URL有时效性 |
+| `/radio/songlist` | 0 (无缓存) | 每次返回不同歌曲 |
+
+**目录结构**:
+```
+proxy-svc/
+├── cmd/server/main.go          # 入口 + 服务反向代理逻辑
+├── internal/
+│   ├── cache/                  # Redis 缓存封装
+│   ├── config/                 # TTL配置
+│   ├── handler/                # 各资源 handlers
+│   ├── middleware/             # JWT中间件 (无DB)
+│   └── upstream/               # 第三方API客户端
+└── go.mod
+```
+
+##### C. sync-svc (端口 8003)
+**核心功能**:
+- WebSocket 实时数据同步
+- 跨设备推送 (收藏、歌单变更)
+- 播放进度同步
+- 定时任务 (历史清理: 每用户保留500条)
+
+**核心特性**:
+- Gorilla WebSocket
+- Redis Pub/Sub (跨实例广播)
+- Cron 定期清理任务
+- 房间管理 (用户维度)
+
+**目录结构**:
+```
+sync-svc/
+├── cmd/server/main.go          # 入口 + WebSocket升级
+├── internal/
+│   ├── handler/                # WS连接处理 + HTTP接口
+│   ├── middleware/             # JWT验证
+│   ├── repo/                   # 数据访问 (favorites, history, playlists)
+│   ├── service/                # 业务逻辑
+│   └── ws/                     # WebSocket 房间管理
+└── go.mod
+```
+
+##### D. admin-svc (端口 8004)
+**核心功能**:
+- 系统初始化 (首次启动)
+- 管理员登录 (用户名+密码, 支持TOTP)
+- 配置管理 (API/JWT/SMS)
+- 用户管理
+- 操作审计日志
+- 数据统计
+
+**权限分层**:
+| 角色 | 权限 |
+|------|------|
+| `SUPER_ADMIN` | 全部权限（系统配置、JWT轮换、创建管理员） |
+| `ADMIN` | 用户管理、内容审核、查看日志 |
+| `USER` | 无admin权限 |
+
+**目录结构**:
+```
+admin-svc/
+├── cmd/
+│   ├── server/main.go          # 主服务入口
+│   └── reset_admin/main.go     # 管理员密码重置工具
+├── internal/
+│   ├── handler/                # HTTP handlers (setup, auth, config, users, stats, logs)
+│   ├── middleware/             # JWT + 角色验证
+│   ├── repo/                   # 数据访问层
+│   ├── service/                # 业务逻辑
+│   └── util/                   # 工具函数 (密码哈希、掩码密钥)
+└── go.mod
+```
+
+#### 共享模块 (shared/go)
+**功能**:
+- `pkg/config`: 配置加密存储服务 (AES-256-GCM)
+- `pkg/crypto`: 加密工具 (AES, 密钥生成, Argon2id)
+- `pkg/rdb`: Redis 客户端封装 + 键命名规范
+
+#### 数据库设计
+**表结构** (PostgreSQL):
+```
+users               # 用户 (phone, role, disabled)
+devices             # 设备 (device_id, rt_hash, platform)
+system_configs      # 系统配置 (加密存储)
+admin_users         # 管理员 (username, password_hash, totp_secret)
+favorites           # 收藏 (软删除)
+history             # 播放历史 (最多500条/用户)
+user_playlists      # 用户歌单 (软删除)
+playlist_songs      # 歌单-歌曲关联
+operation_logs      # 操作审计日志
+```
+
+**设计原则** (D-B决策):
+- 只存第三方ID (song_mid, album_mid, singer_mid)
+- 不存元数据 (歌名、封面等)，客户端按需加载
+- 软删除模式 (deleted_at)
+- 索引优化 (用户+时间、类型+时间)
+
+---
+
+### 1.2 listen_stream_client (Flutter 跨平台客户端)
+
+#### 技术栈
+- **语言**: Dart 3.3.0+ / Flutter 3.22.0+
+- **平台**: Desktop (Windows/macOS/Linux) + Mobile (Android/iOS) + Android TV
+- **状态管理**: Riverpod 2.6.1
+- **路由**: go_router 14.6.2
+- **网络**: Dio 5.7.0
+- **音频**: just_audio 0.9.42 + audio_service 0.18.15
+- **本地存储**: sqflite (ETag缓存) + flutter_secure_storage (Token)
+- **WebSocket**: web_socket_channel 3.0.1
+
+#### 架构分层
+```
+lib/
+├── main.dart                   # 应用入口
+├── app.dart                    # MaterialApp + 路由配置 + Shell
+├── core/                       # 核心功能
+│   ├── auth/                   # 认证状态管理 (authNotifier)
+│   ├── network/                # Dio配置 + 拦截器 (JWT, 错误处理)
+│   ├── player/                 # 音频播放服务 (just_audio封装)
+│   ├── responsive/             # 响应式布局工具
+│   └── theme/                  # 主题配置
+├── data/                       # 数据层
+│   ├── models/                 # 数据模型 (freezed生成)
+│   ├── remote/                 # API服务 (api_service.dart)
+│   └── local/                  # 本地存储 (user_data_service, sqflite)
+├── features/                   # 功能模块 (页面 + 业务逻辑)
+│   ├── auth/                   # 登录页
+│   ├── home/                   # 首页 (推荐、轮播图)
+│   ├── search/                 # 搜索 (歌曲、歌手、专辑、MV)
+│   ├── library/                # 我的音乐 (收藏、歌单、历史)
+│   ├── player/                 # 播放器页面
+│   ├── playlist/               # 歌单详情
+│   ├── singer/                 # 歌手详情
+│   ├── album/                  # 专辑详情
+│   ├── song/                   # 歌曲详情
+│   ├── ranking/                # 排行榜
+│   ├── radio/                  # 电台
+│   ├── mv/                     # MV播放
+│   ├── singer_list/            # 歌手列表
+│   └── mv_list/                # MV列表
+└── shared/                     # 共享组件
+    ├── widgets/                # UI组件 (player_bar, left_nav, tv_components)
+    ├── platform/               # 平台检测 (isTV)
+    ├── utils/                  # 工具函数 (playback_helper)
+    └── examples/               # 使用示例
+```
+
+#### 核心功能模块
+
+##### A. 认证系统 (core/auth)
+- **AuthNotifier**: 全局认证状态管理
+- **Token存储**: flutter_secure_storage (加密)
+- **自动刷新**: Dio拦截器自动处理401, 刷新Token后重试
+
+##### B. 播放服务 (core/player)
+- **PlaybackService**: 
+  - 封装 just_audio + audio_service
+  - 播放队列管理
+  - 播放模式 (顺序/随机/单曲循环)
+  - 进度上报 (每10秒)
+  - 跨设备续播
+- **Song URL获取**: 
+  - 请求 `/api/song/url?id={songId}&name={songName}`
+  - QQ Music → Joox 自动Fallback
+  - 错误提示: PlaybackException → SnackBar
+
+##### C. 数据同步
+- **WebSocket**: 连接 sync-svc, 实时接收推送
+- **事件类型**:
+  - `favorite.added` / `favorite.removed`
+  - `playlist.created` / `playlist.updated` / `playlist.deleted`
+  - `playlist.song_added` / `playlist.song_removed`
+
+##### D. 响应式布局 (core/responsive)
+- **DeviceType**: mobile / tablet / desktop / tv
+- **ResponsiveBuilder**: 根据设备类型渲染不同布局
+- **TV适配**:
+  - 侧边栏导航 (LeftNav)
+  - 焦点管理 (TvKeyHandler)
+  - 大尺寸UI组件
+
+---
+
+### 1.3 listen_stream_admin (React + Vite 管理后台)
+
+#### 技术栈
+- **语言**: TypeScript 5.7.3
+- **框架**: React 19.0.0
+- **构建**: Vite 6.0.11
+- **UI**: Radix UI + Tailwind CSS 4.0.6
+- **状态**: Zustand 5.0.3
+- **数据获取**: TanStack Query 5.65.1
+- **路由**: React Router 7.1.3
+- **HTTP**: Axios 1.7.9
+- **图表**: Recharts 2.15.0
+
+#### 功能模块
+```
+src/
+├── main.tsx                    # 应用入口
+├── router.tsx                  # 路由配置
+├── api/                        # API客户端
+│   ├── client.ts               # Axios实例 + 拦截器
+│   ├── auth.ts                 # 登录/登出
+│   ├── config.ts               # 配置管理 (API/JWT/SMS)
+│   ├── users.ts                # 用户管理
+│   ├── stats.ts                # 数据统计
+│   ├── logs.ts                 # 操作日志
+│   └── setup.ts                # 系统初始化
+├── pages/                      # 页面组件
+│   ├── SetupPage.tsx           # 首次启动设置
+│   ├── LoginPage.tsx           # 管理员登录
+│   ├── DashboardPage.tsx       # 仪表盘
+│   ├── ConfigPage.tsx          # 配置管理
+│   ├── UsersPage.tsx           # 用户管理
+│   └── LogsPage.tsx            # 操作日志
+├── components/                 # UI组件
+│   ├── Layout.tsx              # 布局容器
+│   ├── Sidebar.tsx             # 侧边栏
+│   ├── ProtectedRoute.tsx      # 路由守卫
+│   └── config/                 # 配置表单组件
+└── stores/                     # Zustand状态管理
+    └── auth.ts                 # 认证状态
+```
+
+#### 核心功能
+1. **系统初始化**: 
+   - 生成 JWT 密钥
+   - 创建 super_admin 账号
+   - 配置数据库连接
+
+2. **配置管理**:
+   - **API配置**: BASE_URL, FALLBACK_URL, API_KEY, Cookie
+   - **JWT配置**: 密钥轮换、TTL设置 (需SUPER_ADMIN权限)
+   - **SMS配置**: 短信网关配置
+
+3. **用户管理**:
+   - 查看/禁用用户
+   - 设备管理 (踢出设备)
+   - 角色变更 (SUPER_ADMIN only)
+
+4. **数据统计**:
+   - 用户总数、活跃用户
+   - 收藏、歌单、历史统计
+   - 今日/本周新增用户图表
+
+5. **操作审计**:
+   - 分页查看操作日志
+   - 按操作类型筛选
+   - 敏感字段自动脱敏
+
+---
+
+## 2. 架构分析
+
+### 2.1 系统拓扑图
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                         客户端层 (用户端)                          │
+│  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐ │
+│  │   Desktop App    │  │   Mobile App     │  │   Android TV     │ │
+│  │   (Flutter)      │  │   (Flutter)      │  │   (Flutter)      │ │
+│  └────────┬─────────┘  └────────┬─────────┘  └────────┬─────────┘ │
+└───────────┼──────────────────────┼──────────────────────┼──────────┘
+            │                      │                      │
+            └──────────────────────┴──────────────────────┘
+                                   │
+                          HTTPS + JWT (Bearer Token)
+                                   │
+                                   ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                     后端服务层 (自研微服务)                         │
+│                                                                     │
+│  ┌────────────────────────────────────────────────────────────┐   │
+│  │                     proxy-svc (:8002)                      │   │
+│  │  - 统一入口 (客户端唯一调用点)                              │   │
+│  │  - 反向代理: /auth/* → auth-svc                            │   │
+│  │  - 反向代理: /user/* → auth-svc                            │   │
+│  │  - API代理: /api/* → 第三方API (带缓存)                    │   │
+│  │  - JWT验证 (middleware, 无DB查询)                         │   │
+│  └───────┬──────────────────────────────────────┬──────────────┘   │
+│          │                                      │                  │
+│          │ 内部HTTP                             │ 内部HTTP         │
+│          ▼                                      ▼                  │
+│  ┌──────────────────┐                   ┌──────────────────┐      │
+│  │  auth-svc :8001  │                   │  sync-svc :8003  │      │
+│  │  - 手机号登录     │                   │  - WebSocket     │      │
+│  │  - JWT签发       │                   │  - 实时同步       │      │
+│  │  - Token刷新     │                   │  - Pub/Sub       │      │
+│  │  - 设备管理       │                   │  - Cron定时任务  │      │
+│  └────────┬─────────┘                   └────────┬─────────┘      │
+│           │                                      │                 │
+│           └──────────────────┬───────────────────┘                 │
+│                              │                                     │
+│                              ▼                                     │
+│                   ┌─────────────────────┐                          │
+│                   │  PostgreSQL :5432   │                          │
+│                   │  - users            │                          │
+│                   │  - devices          │                          │
+│                   │  - favorites        │                          │
+│                   │  - history          │                          │
+│                   │  - user_playlists   │                          │
+│                   │  - system_configs   │                          │
+│                   └─────────────────────┘                          │
+│                              ▲                                     │
+│                              │                                     │
+│                   ┌──────────┴──────────┐                          │
+│                   │   Redis :6379       │                          │
+│                   │  - RT缓存           │                          │
+│                   │  - API响应缓存       │                          │
+│                   │  - Pub/Sub          │                          │
+│                   └─────────────────────┘                          │
+└────────────────────────────────────────────────────────────────────┘
+                              ▲
+                              │ 外部HTTPS
+                              │
+┌─────────────────────────────┴─────────────────────────────────────┐
+│                     第三方服务层                                    │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌──────────────────┐  │
+│  │  QQ Music API   │  │  Joox API       │  │  SMS Gateway     │  │
+│  │  (Primary)      │  │  (Fallback)     │  │  (阿里云/腾讯云)  │  │
+│  └─────────────────┘  └─────────────────┘  └──────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────┐
+│                    管理端 (仅管理员访问)                            │
+│  ┌──────────────────────────────────────────────────────────────┐ │
+│  │            Admin Web (React + Vite)                          │ │
+│  │  - 系统初始化 / 配置管理                                      │ │
+│  │  - 用户管理 / 数据统计                                        │ │
+│  │  - 操作日志 / IP限制                                          │ │
+│  └────────────────────────────┬─────────────────────────────────┘ │
+└─────────────────────────────────┼──────────────────────────────────┘
+                                  │ HTTPS (独立子域名)
+                                  ▼
+                         ┌──────────────────┐
+                         │ admin-svc :8004  │
+                         │ - Setup          │
+                         │ - Config         │
+                         │ - Users          │
+                         │ - Stats          │
+                         │ - Logs           │
+                         └──────────────────┘
+```
+
+### 2.2 数据流向分析
+
+#### A. 用户登录流程
+```
+1. Client → proxy-svc → auth-svc: POST /auth/sms/send {phone}
+2. auth-svc → SMS Gateway: 发送6位验证码
+3. Client → proxy-svc → auth-svc: POST /auth/sms/verify {phone, code}
+4. auth-svc → PostgreSQL: 查询/创建 user, 创建 device
+5. auth-svc → Redis: 存储 RT hash
+6. auth-svc → Client: {access_token, refresh_token}
+7. Client: 加密存储 RT, 内存缓存 AT
+```
+
+#### B. 歌曲播放流程 (带Fallback)
+```
+1. Client → proxy-svc: GET /api/song/url?id={songId}&name={songName}
+   + Header: Authorization: Bearer {access_token}
+
+2. proxy-svc 中间件: 验证 JWT (无DB查询, 仅解析Claims)
+
+3. proxy-svc → QQ Music API: GET /song/url?id={songId}
+   + Header: Cookie={配置的Cookie}
+
+4a. QQ返回 code=1: 
+    → proxy-svc → Client: {code: 1, url: "...", source: "qq"}
+
+4b. QQ返回 code=0 (VIP/地区限制):
+    → proxy-svc → Joox API: GET ?types=search&source=joox&name={songName}
+    → 获取 jooxId
+    → proxy-svc → Joox API: GET ?types=url&source=joox&id={jooxId}
+    
+5a. Joox返回URL:
+    → proxy-svc → Client: {code: 1, url: "...", source: "joox"}
+
+5b. Joox返回空:
+    → proxy-svc → Client: {code: 0, message: "暂无播放权限", url: null}
+
+6. Client PlaybackService:
+   - code=1: 使用URL播放
+   - code=0: 抛出 PlaybackException → SnackBar提示
+```
+
+#### C. 收藏同步流程
+```
+1. Client A: 点击收藏按钮
+2. Client A → sync-svc: POST /user/favorites {type, target_id}
+   + Header: Authorization: Bearer {access_token}
+
+3. sync-svc → PostgreSQL: INSERT INTO favorites
+
+4. sync-svc → Redis Pub/Sub: PUBLISH user:{user_id} 
+   {"event": "favorite.added", "data": {...}}
+
+5. sync-svc → 所有该用户的WebSocket连接: 
+   推送消息 (包括Client B、Client C)
+
+6. Client B/C: 收到WebSocket消息 → 更新UI
+```
+
+#### D. 配置热更新流程
+```
+1. Admin Web → admin-svc: PUT /admin/config/api 
+   {API_BASE_URL: "https://new-api.com"}
+
+2. admin-svc → PostgreSQL: 
+   UPDATE system_configs SET value=encrypt(...) WHERE key='API_BASE_URL'
+
+3. admin-svc → ConfigService: Invalidate cache
+
+4. proxy-svc: 下次请求时从 ConfigService 读取新配置 
+   (30秒缓存过期后自动生效)
+```
+
+### 2.3 依赖关系图
+
+```
+[Client Flutter] 
+     │
+     ├──→ [proxy-svc]  ────┐
+     │         │            │
+     │         ├──→ [auth-svc] ──→ [PostgreSQL]
+     │         │                   [Redis]
+     │         ├──→ [QQ Music API]
+     │         └──→ [Joox API]
+     │
+     └──→ [sync-svc] ──────────→ [PostgreSQL]
+                                  [Redis Pub/Sub]
+
+[Admin Web]
+     │
+     └──→ [admin-svc] ─────────→ [PostgreSQL]
+                                  [Redis]
+
+[共享依赖]
+  - listen-stream/shared (Go共享包)
+    ├── pkg/config  (配置加密服务)
+    ├── pkg/crypto  (加密工具)
+    └── pkg/rdb     (Redis封装)
+```
+
+### 2.4 关键技术决策
+
+#### A. 微服务拆分原则
+| 服务 | 职责 | 独立性 |
+|------|------|--------|
+| **auth-svc** | 认证授权 | 高 (独立数据表, 独立部署) |
+| **proxy-svc** | API网关 | 高 (无状态, 可水平扩展) |
+| **sync-svc** | 实时同步 | 中 (依赖PostgreSQL) |
+| **admin-svc** | 管理后台 | 中 (共享数据库) |
+
+#### B. 缓存策略
+| 层级 | 技术 | 用途 |
+|------|------|------|
+| **服务端 Redis** | go-redis | API响应缓存 (可配置TTL) |
+| **客户端 sqflite** | Flutter | ETag持久化, 断网降级 |
+| **内存缓存** | ConfigService (30s) | 热配置 |
+
+#### C. 安全设计
+| 机制 | 实现 |
+|------|------|
+| **敏感配置加密** | AES-256-GCM (system_configs表) |
+| **密码存储** | Argon2id (admin_users表) |
+| **JWT密钥** | 256-bit随机生成, 可轮换 |
+| **Refresh Token** | SHA-256 hash存储 (devices表) |
+| **操作审计** | 所有管理操作记录日志 (operation_logs) |
+| **TOTP支持** | 管理员可选双因素认证 |
+
+---
+
+## 3. 改进建议
+
+### 3.1 架构层面
+
+#### A. 服务治理
+**问题**:
+- 缺少服务注册与发现 (目前硬编码端口)
+- 无熔断机制 (上游故障可能级联)
+- 无链路追踪 (跨服务调试困难)
+
+**建议**:
+1. **服务注册**: 引入 Consul / etcd
+   ```go
+   // 服务启动时注册
+   consul.Register("auth-svc", "localhost:8001", healthCheckURL)
+   
+   // proxy-svc 从注册中心获取
+   authURL := consul.Discover("auth-svc")
+   ```
+
+2. **熔断器**: 使用 go-resilience / hystrix-go
+   ```go
+   breaker := gobreaker.NewCircuitBreaker(gobreaker.Settings{
+       Name:        "QQ-Music-API",
+       MaxRequests: 3,
+       Timeout:     time.Second * 10,
+   })
+   
+   result, err := breaker.Execute(func() (interface{}, error) {
+       return upstreamClient.Do(ctx, path, query)
+   })
+   ```
+
+3. **链路追踪**: OpenTelemetry + Jaeger
+   ```go
+   // 每个请求注入 trace_id
+   span := tracer.Start(ctx, "proxy-handler")
+   defer span.End()
+   ```
+
+#### B. 缓存优化
+**问题**:
+- 无缓存预热机制
+- 无缓存击穿保护
+- stale缓存返回无TTL控制
+
+**建议**:
+1. **预热机制**: 启动时加载热点数据
+   ```go
+   func (c *ProxyCache) Warmup(ctx context.Context) error {
+       hotPaths := []string{"/recommend/banner", "/playlist/category"}
+       for _, path := range hotPaths {
+           // 预加载到Redis
+       }
+   }
+   ```
+
+2. **单飞模式** (singleflight): 防止缓存击穿
+   ```go
+   import "golang.org/x/sync/singleflight"
+   
+   var g singleflight.Group
+   
+   result, err, _ := g.Do(cacheKey, func() (interface{}, error) {
+       return h.client.Do(ctx, upstreamPath, rawQuery)
+   })
+   ```
+
+3. **Stale返回策略**: 
+   - 当前: 上游失败 → 返回stale
+   - 改进: 增加 `X-Cache-TTL` 头, 客户端判断是否可用
+
+#### C. 配置中心化
+**问题**:
+- 配置分散 (环境变量 + 数据库)
+- 无配置变更历史
+- 无回滚机制
+
+**建议**:
+1. **统一配置中心**: Consul KV / etcd
+2. **版本控制**: 
+   ```sql
+   ALTER TABLE system_configs ADD COLUMN version INT DEFAULT 1;
+   ALTER TABLE system_configs ADD COLUMN history JSONB;
+   ```
+
+3. **变更通知**: 
+   - 使用 Redis Pub/Sub 广播配置变更
+   - 各服务订阅后立即刷新缓存
+
+### 3.2 服务层面
+
+#### A. proxy-svc 优化
+
+##### 1. 播放URL优化
+**当前问题**:
+- Joox搜索可能匹配错误歌曲 (仅按名称)
+- 无重试机制
+- 无降级策略
+
+**改进建议**:
+```go
+// 1. 增加歌手名称匹配
+func (h *SongHandler) tryJooxFallback(ctx context.Context, songName, artistName string) (string, error) {
+    // 搜索时包含歌手名: "{songName} {artistName}"
+    searchQuery := fmt.Sprintf("types=search&source=joox&name=%s", 
+        url.QueryEscape(songName + " " + artistName))
+    
+    // 2. 结果过滤: 模糊匹配歌名+歌手
+    bestMatch := findBestMatch(searchResp, songName, artistName)
+}
+
+// 2. 增加重试逻辑
+func (h *SongHandler) url(c *gin.Context) {
+    const maxRetries = 2
+    for i := 0; i < maxRetries; i++ {
+        qqURL, err := h.tryQQMusicWithRetry(ctx, id)
+        if err == nil { return }
+        time.Sleep(time.Millisecond * 500)
+    }
+}
+
+// 3. 添加更多Fallback源
+type FallbackChain []FallbackSource
+func (h *SongHandler) tryFallbackChain(ctx context.Context, song SongInfo) (string, error) {
+    sources := []FallbackSource{
+        &JooxSource{},
+        &NetEaseSource{},
+        &KugouSource{},
+    }
+    for _, src := range sources {
+        if url, err := src.GetURL(ctx, song); err == nil {
+            return url, nil
+        }
+    }
+    return "", ErrNoSource
+}
+```
+
+##### 2. 缓存分级
+**改进**:
+```go
+// L1: 内存缓存 (热点数据, 5分钟)
+var memCache = NewMemoryCache(5 * time.Minute, 1000)
+
+// L2: Redis缓存 (当前实现)
+// L3: Stale缓存 (降级)
+
+func (h *ProxyHandler) handle(c *gin.Context, path string, ttl time.Duration) {
+    // 1. 尝试 L1
+    if entry, ok := memCache.Get(cacheKey); ok {
+        return entry
+    }
+    
+    // 2. 尝试 L2 (Redis)
+    if entry, err := h.cache.Get(ctx, cacheKey); err == nil {
+        memCache.Set(cacheKey, entry)
+        return entry
+    }
+    
+    // 3. 请求上游
+    body, err := h.client.Do(ctx, path, query)
+    if err != nil {
+        // 4. 降级到 L3 (Stale)
+        return h.cache.GetStale(ctx, cacheKey)
+    }
+    
+    // 写回缓存
+    memCache.Set(cacheKey, entry)
+    h.cache.Set(ctx, cacheKey, entry, ttl)
+}
+```
+
+##### 3. 速率限制
+**当前问题**: 无限流, 可能被上游封禁
+
+**改进**:
+```go
+import "golang.org/x/time/rate"
+
+var upstreamLimiter = rate.NewLimiter(rate.Every(time.Second/10), 20) // 20 req/s
+
+func (c *Client) Do(ctx context.Context, path, query string) ([]byte, error) {
+    if err := upstreamLimiter.Wait(ctx); err != nil {
+        return nil, ErrRateLimited
+    }
+    // ...
+}
+```
+
+#### B. sync-svc 优化
+
+##### 1. WebSocket连接管理
+**当前问题**:
+- 无心跳机制 (连接可能僵死)
+- 无重连策略
+- 无连接数限制
+
+**改进**:
+```go
+// 1. 心跳机制
+type WSConnection struct {
+    conn        *websocket.Conn
+    lastPing    time.Time
+    pingTimeout time.Duration
+}
+
+func (ws *WSConnection) StartHeartbeat() {
+    ticker := time.NewTicker(30 * time.Second)
+    defer ticker.Stop()
+    
+    for range ticker.C {
+        if time.Since(ws.lastPing) > ws.pingTimeout {
+            ws.conn.Close()
+            return
+        }
+        ws.conn.WriteMessage(websocket.PingMessage, []byte{})
+    }
+}
+
+// 2. 客户端重连策略
+class WebSocketManager {
+  int _reconnectAttempts = 0;
+  final int _maxReconnectAttempts = 5;
+  
+  void _reconnect() {
+    if (_reconnectAttempts >= _maxReconnectAttempts) return;
+    
+    final delay = min(pow(2, _reconnectAttempts) * 1000, 30000);
+    Timer(Duration(milliseconds: delay), () => connect());
+    _reconnectAttempts++;
+  }
+}
+
+// 3. 连接数限制 (防止资源耗尽)
+var connectionLimit = NewSemaphore(10000) // 最多1万连接
+
+func (h *SyncHandler) HandleWebSocket(c *gin.Context) {
+    if !connectionLimit.TryAcquire() {
+        c.JSON(http.StatusServiceUnavailable, gin.H{"error": "too many connections"})
+        return
+    }
+    defer connectionLimit.Release()
+    // ...
+}
+```
+
+##### 2. 消息可靠性
+**当前问题**:
+- 客户端离线时消息丢失
+- 无消息确认机制
+
+**改进**:
+```go
+// 1. 离线消息队列 (Redis List)
+func (s *SyncService) PushOfflineMessage(userID string, msg Message) error {
+    key := fmt.Sprintf("offline:msg:%s", userID)
+    json, _ := json.Marshal(msg)
+    return s.rdb.RPush(ctx, key, json).Err()
+}
+
+// 2. 客户端连接时拉取离线消息
+func (ws *WSConnection) OnConnect() {
+    msgs := s.GetOfflineMessages(ws.userID)
+    for _, msg := range msgs {
+        ws.Send(msg)
+    }
+}
+
+// 3. 消息确认机制
+type Message struct {
+    ID       string
+    Event    string
+    Data     interface{}
+    AckToken string  // 客户端需回复此token
+}
+
+// 客户端回复
+{"type": "ack", "token": "msg_id_123"}
+
+// 服务端收到ACK后删除离线消息
+```
+
+#### C. auth-svc 优化
+
+##### 1. 短信发送优化
+**当前问题**:
+- 无失败重试
+- 无多厂商fallback
+- 无发送统计
+
+**改进**:
+```go
+// 1. 多厂商适配器
+type SMSProvider interface {
+    Send(phone, code string) error
+}
+
+type AliyunSMS struct {}
+func (a *AliyunSMS) Send(phone, code string) error { /* ... */ }
+
+type TencentSMS struct {}
+func (t *TencentSMS) Send(phone, code string) error { /* ... */ }
+
+// 2. Fallback链
+type SMSService struct {
+    providers []SMSProvider
+}
+
+func (s *SMSService) SendWithFallback(phone, code string) error {
+    for _, provider := range s.providers {
+        if err := provider.Send(phone, code); err == nil {
+            return nil
+        }
+        log.Warn("SMS provider failed, trying next", zap.Error(err))
+    }
+    return ErrAllProvidersFailed
+}
+
+// 3. 统计表
+CREATE TABLE sms_records (
+    id         TEXT PRIMARY KEY,
+    phone      TEXT NOT NULL,
+    provider   TEXT NOT NULL,
+    status     TEXT NOT NULL,  -- 'sent'|'failed'
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX sms_records_time_idx ON sms_records (created_at DESC);
+```
+
+##### 2. Token安全增强
+**当前改进点**:
+```go
+// 1. Token绑定IP (可选, 严格模式)
+type Claims struct {
+    UserID     string
+    DeviceID   string
+    ClientIP   string  // 新增
+    IssuedAt   int64
+    ExpiresAt  int64
+}
+
+// 验证时检查IP
+func (j *JWTService) VerifyWithIP(token, clientIP string) (*Claims, error) {
+    claims, err := j.Verify(token)
+    if err != nil { return nil, err }
+    
+    if j.strictMode && claims.ClientIP != clientIP {
+        return nil, ErrIPMismatch
+    }
+    return claims, nil
+}
+
+// 2. Token版本号 (支持撤销所有Token)
+// system_configs 增加 USER_TOKEN_VERSION
+// Claims 增加 Version 字段
+// 验证时检查版本号
+
+// 3. 设备指纹验证
+// 客户端上报: OS版本、设备型号、屏幕分辨率等
+// 检测异常登录 (设备特征突变)
+```
+
+#### D. admin-svc 优化
+
+##### 1. 操作审计增强
+**改进**:
+```go
+// 1. 增加审计详情
+type AuditDetail struct {
+    Action     string
+    TargetType string  // "user" | "config" | "device"
+    TargetID   string
+    Before     map[string]interface{}  // 结构化数据
+    After      map[string]interface{}
+    RequestID  string  // 关联请求链路
+}
+
+// 2. 异常操作告警
+func (h *LogHandler) DetectAnomalies() {
+    // 检测规则:
+    // - 短时间内大量禁用用户操作
+    // - 非工作时间修改JWT配置
+    // - 连续失败的登录尝试
+    
+    if Count("USER_DISABLED", lastHour) > 20 {
+        SendAlert("管理员 %s 在1小时内禁用了20个用户", adminID)
+    }
+}
+
+// 3. 审计日志导出
+// GET /admin/logs/export?start_date=2026-01-01&end_date=2026-01-31
+// 返回 CSV 文件
+```
+
+##### 2. 数据统计优化
+**当前问题**: 实时查询数据库, 慢
+
+**改进**:
+```go
+// 1. 定时聚合 (Cron任务)
+CREATE TABLE daily_stats (
+    date       DATE PRIMARY KEY,
+    total_users      INT,
+    active_users     INT,
+    new_users        INT,
+    total_favorites  INT,
+    total_playlists  INT,
+    total_history    INT
+);
+
+// 每日凌晨跑聚合任务
+func (c *CronService) AggregateStats() {
+    stats := calculateDailyStats(yesterday)
+    db.InsertDailyStats(stats)
+}
+
+// 2. Dashboard 读取聚合表 (秒级响应)
+func (h *StatsHandler) GetDashboard(c *gin.Context) {
+    stats := db.GetDailyStats(last30Days)
+    c.JSON(http.StatusOK, stats)
+}
+
+// 3. 实时指标用 Redis
+// INCR daily:new_users:2026-02-23
+// GET daily:active_users:2026-02-23
+```
+
+### 3.3 客户端层面
+
+#### A. Flutter性能优化
+
+##### 1. 图片加载优化
+**当前问题**: 大量封面图加载, 内存占用高
+
+**改进**:
+```dart
+// 1. 使用 cached_network_image + 自定义配置
+CachedNetworkImage(
+  imageUrl: coverUrl,
+  memCacheWidth: 300,  // 限制内存缓存尺寸
+  maxWidthDiskCache: 600,  // 限制磁盘缓存尺寸
+  cacheManager: CustomCacheManager(
+    maxNrOfCacheObjects: 500,  // 限制缓存数量
+    stalePeriod: Duration(days: 7),
+  ),
+)
+
+// 2. 列表中使用缩略图
+String getThumbnailUrl(String originalUrl) {
+  // QQ Music支持参数控制尺寸
+  return originalUrl.replaceAll('T002R300x300', 'T002R150x150');
+}
+
+// 3. 虚拟滚动 (大列表)
+ListView.builder(
+  itemCount: songs.length,
+  itemBuilder: (context, index) {
+    // 只构建可见item
+  },
+  cacheExtent: 500,  // 预缓存高度
+)
+```
+
+##### 2. 状态管理优化
+**改进**:
+```dart
+// 1. 精细化依赖
+// 不好: 整个列表变化, 所有UI重建
+final playlists = ref.watch(playlistsProvider);
+
+// 好: 只监听需要的字段
+final playlistCount = ref.watch(
+  playlistsProvider.select((p) => p.length)
+);
+
+// 2. 使用 family + autoDispose
+@riverpod
+Future<Song> song(SongRef ref, String songId) async {
+  final api = ref.watch(apiServiceProvider);
+  return await api.getSongDetail(songId);
+}
+// 自动缓存, 不用时自动释放
+
+// 3. 防抖搜索
+final searchQueryProvider = StateNotifierProvider<SearchQuery, String>(...);
+
+@riverpod
+Future<List<Song>> searchResults(SearchResultsRef ref) async {
+  final query = ref.watch(searchQueryProvider);
+  
+  // 防抖300ms
+  await Future.delayed(Duration(milliseconds: 300));
+  if (ref.state != ref.watch(searchQueryProvider)) {
+    throw Exception('Query changed');
+  }
+  
+  return await api.search(query);
+}
+```
+
+##### 3. 离线功能增强
+**当前问题**: 断网后无法浏览已加载内容
+
+**改进**:
+```dart
+// 1. sqflite 本地缓存增强
+class CacheRepository {
+  // 缓存歌单详情
+  Future<void> cachePlaylistDetail(String id, PlaylistDetail detail) async {
+    final db = await database;
+    await db.insert('playlist_cache', {
+      'id': id,
+      'data': jsonEncode(detail.toJson()),
+      'cached_at': DateTime.now().millisecondsSinceEpoch,
+    }, conflictAlgorithm: ConflictAlgorithm.replace);
+  }
+  
+  // 读取缓存 (带过期检查)
+  Future<PlaylistDetail?> getCachedPlaylist(String id) async {
+    final db = await database;
+    final List<Map<String, dynamic>> maps = await db.query(
+      'playlist_cache',
+      where: 'id = ? AND cached_at > ?',
+      whereArgs: [id, DateTime.now().subtract(Duration(days: 7)).millisecondsSinceEpoch],
+    );
+    
+    if (maps.isEmpty) return null;
+    return PlaylistDetail.fromJson(jsonDecode(maps.first['data']));
+  }
+}
+
+// 2. API请求增强
+@riverpod
+Future<PlaylistDetail> playlistDetail(PlaylistDetailRef ref, String id) async {
+  final cache = ref.watch(cacheRepositoryProvider);
+  final api = ref.watch(apiServiceProvider);
+  
+  try {
+    // 1. 尝试网络请求
+    final detail = await api.getPlaylistDetail(id);
+    
+    // 2. 成功后更新缓存
+    await cache.cachePlaylistDetail(id, detail);
+    
+    return detail;
+  } catch (e) {
+    // 3. 网络失败, 返回缓存
+    final cached = await cache.getCachedPlaylist(id);
+    if (cached != null) return cached;
+    
+    rethrow;
+  }
+}
+
+// 3. 离线提示
+if (await checkConnectivity() == ConnectivityResult.none) {
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text('离线模式：显示缓存内容'),
+      duration: Duration(seconds: 2),
+    ),
+  );
+}
+```
+
+#### B. TV端优化
+
+##### 1. 焦点管理增强
+**改进**:
+```dart
+// 1. 焦点记忆
+class FocusMemory {
+  static final Map<String, FocusNode> _memory = {};
+  
+  static void rememberFocus(String routeName, FocusNode node) {
+    _memory[routeName] = node;
+  }
+  
+  static void restoreFocus(String routeName) {
+    _memory[routeName]?.requestFocus();
+  }
+}
+
+// 页面返回时恢复焦点
+class HomePage extends ConsumerStatefulWidget {
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      FocusMemory.restoreFocus('/home');
+    });
+  }
+}
+
+// 2. 焦点环
+// 列表末尾按下键时, 焦点回到第一项
+class TVListView extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Focus(
+      onKey: (node, event) {
+        if (event is RawKeyDownEvent) {
+          if (event.logicalKey == LogicalKeyboardKey.arrowDown) {
+            if (isLastItem && atBottom) {
+              firstItemFocusNode.requestFocus();
+              return KeyEventResult.handled;
+            }
+          }
+        }
+        return KeyEventResult.ignored;
+      },
+      child: ListView(...),
+    );
+  }
+}
+
+// 3. 焦点区域边界
+// 防止焦点跳出播放器控制区
+FocusScope(
+  canRequestFocus: true,
+  skipTraversal: false,
+  child: PlayerControls(),
+)
+```
+
+##### 2. 性能优化 (TV端)
+**改进**:
+```dart
+// 1. 降低动画复杂度
+ThemeData tvTheme = ThemeData.dark().copyWith(
+  pageTransitionsTheme: PageTransitionsTheme(
+    builders: {
+      TargetPlatform.android: FadeUpwardsPageTransitionsBuilder(),
+      // TV用简单的Fade, 不用Slide (避免过度绘制)
+    },
+  ),
+);
+
+// 2. 延迟加载非关键内容
+class HomePage extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Column(
+      children: [
+        // 首屏内容: 立即加载
+        BannerSection(),
+        RecommendPlaylistSection(),
+        
+        // 非首屏: 延迟加载
+        FutureBuilder(
+          future: Future.delayed(Duration(milliseconds: 500)),
+          builder: (context, snapshot) {
+            if (!snapshot.hasData) return SizedBox();
+            return NewSongsSection();
+          },
+        ),
+      ],
+    );
+  }
+}
+
+// 3. 图片预加载 (TV端带宽好)
+void preloadImages(List<String> urls) {
+  for (final url in urls.take(10)) {  // 预加载前10张
+    precacheImage(NetworkImage(url), context);
+  }
+}
+```
+
+### 3.4 播放功能专项优化
+
+#### A. 播放队列管理
+**当前问题**: 简单的List, 无去重, 无智能排序
+
+**改进**:
+```dart
+class SmartPlayQueue {
+  final List<Song> _queue = [];
+  final Set<String> _songIds = {};
+  
+  // 1. 去重添加
+  void addSong(Song song) {
+    if (_songIds.contains(song.mid)) {
+      // 已存在, 移到末尾
+      _queue.removeWhere((s) => s.mid == song.mid);
+    }
+    _queue.add(song);
+    _songIds.add(song.mid);
+  }
+  
+  // 2. 智能插入 (下一首)
+  void addNext(Song song, int currentIndex) {
+    if (_songIds.contains(song.mid)) {
+      _queue.removeWhere((s) => s.mid == song.mid);
+      _songIds.remove(song.mid);
+    }
+    _queue.insert(currentIndex + 1, song);
+    _songIds.add(song.mid);
+  }
+  
+  // 3. 批量添加歌单 (去重 + 保留顺序)
+  void addPlaylist(List<Song> songs) {
+    for (final song in songs) {
+      if (!_songIds.contains(song.mid)) {
+        _queue.add(song);
+        _songIds.add(song.mid);
+      }
+    }
+  }
+  
+  // 4. 清空队列
+  void clear() {
+    _queue.clear();
+    _songIds.clear();
+  }
+}
+```
+
+#### B. 播放策略优化
+**改进**:
+```dart
+// 1. 预加载下一首
+class PlaybackService {
+  Song? _nextSong;
+  String? _nextSongUrl;
+  
+  Future<void> _preloadNextSong() async {
+    final nextIndex = _getNextIndex();
+    if (nextIndex < _queue.songs.length) {
+      _nextSong = _queue.songs[nextIndex];
+      
+      // 异步获取URL (不阻塞当前播放)
+      _nextSongUrl = await _fetchSongUrl(_nextSong!);
+    }
+  }
+  
+  // 播放下一首时直接使用预加载的URL
+  Future<void> playNext() async {
+    if (_nextSong != null && _nextSongUrl != null) {
+      await _playWithUrl(_nextSong!, _nextSongUrl!);
+      _preloadNextSong();  // 继续预加载下下首
+    } else {
+      await _normalPlayNext();
+    }
+  }
+}
+
+// 2. 失败重试
+Future<String> _fetchSongUrlWithRetry(String songId, String songName) async {
+  const maxRetries = 3;
+  int attempt = 0;
+  
+  while (attempt < maxRetries) {
+    try {
+      final resp = await api.getSongUrl(songId, songName);
+      if (resp['code'] == 1) return resp['url'];
+      throw PlaybackException(resp['message']);
+    } catch (e) {
+      attempt++;
+      if (attempt >= maxRetries) rethrow;
+      await Future.delayed(Duration(seconds: attempt));
+    }
+  }
+  throw PlaybackException('多次重试失败');
+}
+
+// 3. 播放失败自动跳过
+void _setupErrorHandling() {
+  _player.playerStateStream.listen((state) {
+    if (state.processingState == ProcessingState.error) {
+      // 自动播放下一首
+      playNext();
+      
+      // 提示用户
+      _showToast('${currentSong?.name} 播放失败，已跳过');
+    }
+  });
+}
+```
+
+#### C. 歌词同步优化
+**当前状态**: 未实现
+
+**建议实现**:
+```dart
+// 1. 歌词解析
+class LyricLine {
+  final Duration timestamp;
+  final String text;
+  final String? translation;
+}
+
+class LyricParser {
+  static List<LyricLine> parse(String lrcContent) {
+    final lines = <LyricLine>[];
+    final regex = RegExp(r'\[(\d{2}):(\d{2})\.(\d{2,3})\](.*)');
+    
+    for (final line in lrcContent.split('\n')) {
+      final match = regex.firstMatch(line);
+      if (match != null) {
+        final minutes = int.parse(match.group(1)!);
+        final seconds = int.parse(match.group(2)!);
+        final milliseconds = int.parse(match.group(3)!.padRight(3, '0'));
+        final text = match.group(4)!.trim();
+        
+        lines.add(LyricLine(
+          timestamp: Duration(
+            minutes: minutes,
+            seconds: seconds,
+            milliseconds: milliseconds,
+          ),
+          text: text,
+        ));
+      }
+    }
+    
+    return lines..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  }
+}
+
+// 2. 歌词同步显示
+class LyricView extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final position = ref.watch(positionProvider);
+    final lyrics = ref.watch(currentLyricsProvider);
+    
+    final currentIndex = lyrics.indexWhere((line) {
+      return line.timestamp > position;
+    }) - 1;
+    
+    return ListView.builder(
+      controller: _scrollController,
+      itemCount: lyrics.length,
+      itemBuilder: (context, index) {
+        final isCurrent = index == currentIndex;
+        return AnimatedDefaultTextStyle(
+          duration: Duration(milliseconds: 200),
+          style: TextStyle(
+            fontSize: isCurrent ? 24 : 18,
+            color: isCurrent ? Colors.white : Colors.grey,
+            fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+          ),
+          child: Text(lyrics[index].text),
+        );
+      },
+    );
+  }
+  
+  // 自动滚动到当前行
+  void _scrollToCurrentLine(int index) {
+    _scrollController.animateTo(
+      index * 50.0,  // 每行高度
+      duration: Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+}
+```
+
+### 3.5 整体架构优化
+
+#### A. API网关增强
+**建议**: proxy-svc 升级为完整 API Gateway
+
+**功能增强**:
+```
+1. 统一错误处理
+   - 标准化错误码
+   - 错误日志聚合
+   - 错误告警
+
+2. 请求日志
+   - 记录所有请求 (path, method, user_id, latency)
+   - ELK/Loki 日志分析
+   - 慢查询告警
+
+3. 限流
+   - 用户维度: 100 req/min
+   - IP维度: 1000 req/min
+   - 全局: 10000 req/min
+
+4. API版本管理
+   - /v1/api/song/url
+   - /v2/api/song/url
+   - 兼容旧版本
+
+5. GraphQL支持 (可选)
+   - 客户端按需查询字段
+   - 减少over-fetching
+```
+
+#### B. 可观测性建设
+**当前状态**: 仅zap日志
+
+**完整方案**:
+```
+1. 日志 (Logging)
+   - 结构化日志 (JSON)
+   - 日志等级: DEBUG/INFO/WARN/ERROR
+   - ELK Stack: Elasticsearch + Logstash + Kibana
+   - Loki + Grafana (轻量级方案)
+
+2. 指标 (Metrics)
+   - Prometheus采集
+     * http_requests_total
+     * http_request_duration_seconds
+     * db_query_duration_seconds
+     * cache_hit_rate
+     * active_websocket_connections
+   - Grafana可视化
+     * 实时QPS
+     * P95延迟
+     * 错误率
+     * 资源使用率
+
+3. 链路追踪 (Tracing)
+   - OpenTelemetry + Jaeger
+   - 跨服务调用链路可视化
+   - 定位性能瓶颈
+
+4. 告警 (Alerting)
+   - Prometheus Alertmanager
+   - 告警规则:
+     * 错误率 > 1%
+     * P95延迟 > 1s
+     * 可用率 < 99.9%
+   - 通知: 企业微信/钉钉/邮件
+```
+
+#### C. 部署优化
+**当前**: Docker Compose (单机)
+
+**生产化建议**:
+```
+1. 容器编排
+   - Kubernetes (推荐)
+   - Docker Swarm (轻量级)
+
+2. 服务拓扑
+   apiVersion: apps/v1
+   kind: Deployment
+   metadata:
+     name: proxy-svc
+   spec:
+     replicas: 3  # 3副本
+     selector:
+       matchLabels:
+         app: proxy-svc
+     template:
+       spec:
+         containers:
+         - name: proxy-svc
+           image: listen-stream/proxy-svc:v1.0.0
+           ports:
+           - containerPort: 8002
+           resources:
+             requests:
+               memory: "256Mi"
+               cpu: "250m"
+             limits:
+               memory: "512Mi"
+               cpu: "500m"
+           livenessProbe:
+             httpGet:
+               path: /health
+               port: 8002
+             initialDelaySeconds: 10
+             periodSeconds: 10
+           readinessProbe:
+             httpGet:
+               path: /health
+               port: 8002
+             initialDelaySeconds: 5
+             periodSeconds: 5
+
+3. 数据库高可用
+   - PostgreSQL 主从复制
+   - pgpool-II (连接池 + 负载均衡)
+   - Patroni (自动Failover)
+
+4. Redis高可用
+   - Redis Sentinel (哨兵模式)
+   - Redis Cluster (分片)
+
+5. 负载均衡
+   - Nginx / HAProxy (L7)
+   - Ingress Controller (K8s)
+
+6. CI/CD
+   - GitHub Actions / GitLab CI
+   - 自动化测试
+   - 自动化部署
+```
+
+---
+
+## 4. 边界与安全案例
+
+### 4.1 边界情况 (Edge Cases)
+
+#### A. 认证层
+
+##### 1. Token过期边界
+**场景**: 
+- 用户在 Access Token 即将过期时发起请求
+- 请求中途 Token 过期
+
+**当前问题**:
+- 可能导致请求失败
+
+**解决方案**:
+```dart
+// 客户端: 主动检查Token过期时间, 提前刷新
+class TokenManager {
+  Future<String> getValidToken() async {
+    final token = await getAccessToken();
+    final expiresAt = parseJWT(token).exp;
+    
+    // 提前5分钟刷新
+    if (DateTime.now().add(Duration(minutes: 5)).isAfter(expiresAt)) {
+      return await refreshToken();
+    }
+    
+    return token;
+  }
+}
+
+// 服务端: Token过期时返回特定错误码
+if claims.ExpiresAt < time.Now().Unix() {
+    c.JSON(http.StatusUnauthorized, gin.H{
+        "code": "TOKEN_EXPIRED",
+        "message": "Access token expired, please refresh",
+    })
+    return
+}
+
+// 客户端: 收到 TOKEN_EXPIRED → 自动刷新 → 重试原请求
+interceptor.onError((error) async {
+  if (error.response?.data['code'] == 'TOKEN_EXPIRED') {
+    await refreshToken();
+    return dio.request(error.requestOptions.path);
+  }
+})
+```
+
+##### 2. 设备数量限制边界
+**场景**: 用户已有5台设备, 在第6台设备登录
+
+**当前实现**: 删除最旧的设备
+
+**边界情况**:
+- 最旧设备正在请求时被删除
+- 最旧设备是用户当前主设备
+
+**改进**:
+```go
+// 1. 删除前检查活跃度
+func (r *DeviceRepo) getDeviceToEvict(userID string) (*Device, error) {
+    // 优先删除 7 天未活跃的设备
+    inactive := r.findInactiveDevices(userID, 7*24*time.Hour)
+    if len(inactive) > 0 {
+        return inactive[0], nil
+    }
+    
+    // 否则删除最旧的
+    return r.findOldestDevice(userID)
+}
+
+// 2. 软删除+通知用户
+// 删除设备时保留 RT Hash 24小时
+func (r *DeviceRepo) SoftDeleteDevice(deviceID string) error {
+    return r.db.Exec(`
+        UPDATE devices 
+        SET deleted_at = NOW(), rt_expires_at = NOW() + INTERVAL '24 hours'
+        WHERE device_id = $1
+    `, deviceID)
+}
+
+// 该设备下次请求时收到特定错误
+if device.DeletedAt != nil {
+    return ErrDeviceEvicted  // "您的设备已被移除，请重新登录"
+}
+
+// 3. 给用户选择权 (Admin后台)
+// 列出所有设备, 用户可手动删除
+```
+
+##### 3. 短信验证码边界
+**场景**:
+- 用户连续发送多个验证码
+- 用户用旧验证码尝试登录
+
+**边界情况**:
+```go
+// 1. 只验证最新的验证码
+type SMSCode struct {
+    Phone     string
+    Code      string
+    CreatedAt time.Time
+    Used      bool
+}
+
+func (s *SMSService) Verify(phone, code string) error {
+    // 获取该手机号最新的验证码
+    latestCode := s.getLatestCode(phone)
+    
+    if latestCode == nil {
+        return ErrCodeNotFound
+    }
+    
+    if latestCode.Used {
+        return ErrCodeAlreadyUsed
+    }
+    
+    if time.Since(latestCode.CreatedAt) > 5*time.Minute {
+        return ErrCodeExpired
+    }
+    
+    if latestCode.Code != code {
+        return ErrCodeMismatch
+    }
+    
+    // 标记为已使用
+    s.markCodeAsUsed(phone, code)
+    return nil
+}
+
+// 2. 防止验证码碰撞 (多个手机号生成相同验证码)
+// 使用 phone + code 复合键
+key := fmt.Sprintf("sms:%s:%s", phone, code)
+```
+
+#### B. 播放层
+
+##### 1. 并发播放请求
+**场景**: 用户快速点击多首歌曲
+
+**当前问题**: 可能同时发起多个播放请求, 浪费资源
+
+**解决方案**:
+```dart
+class PlaybackService {
+  Future<void>? _currentPlayRequest;
+  
+  Future<void> playSong(Song song) async {
+    // 取消之前的播放请求
+    _currentPlayRequest = null;
+    
+    // 创建新的播放请求
+    _currentPlayRequest = _playSongInternal(song);
+    
+    try {
+      await _currentPlayRequest!;
+    } catch (e) {
+      if (e is! CancelledException) {
+        rethrow;
+      }
+    }
+  }
+  
+  Future<void> _playSongInternal(Song song) async {
+    // ...播放逻辑
+  }
+}
+```
+
+##### 2. 网络切换边界
+**场景**: 
+- 用户从WiFi切换到移动网络
+- 移动网络信号不稳定
+
+**当前问题**: 播放中断
+
+**改进**:
+```dart
+// 1. 监听网络状态
+class ConnectivityService {
+  final _connectivityController = StreamController<ConnectivityResult>();
+  
+  void init() {
+    Connectivity().onConnectivityChanged.listen((result) {
+      _connectivityController.add(result);
+      _handleConnectivityChange(result);
+    });
+  }
+  
+  void _handleConnectivityChange(ConnectivityResult result) {
+    if (result == ConnectivityResult.none) {
+      // 断网: 暂停播放, 显示提示
+      playbackService.pause();
+      showToast('网络已断开');
+    } else if (result == ConnectivityResult.mobile) {
+      // 切换到移动网络: 提示用户
+      if (settings.wifiOnlyMode) {
+        playbackService.pause();
+        showDialog('已切换到移动网络，是否继续播放？');
+      }
+    }
+  }
+}
+
+// 2. 自动重连
+class AudioStreamHandler {
+  void handleStreamError(Exception e) {
+    if (e is SocketException) {
+      // 网络错误: 重试3次
+      _retryPlay(maxAttempts: 3);
+    }
+  }
+  
+  Future<void> _retryPlay({required int maxAttempts}) async {
+    for (int i = 0; i < maxAttempts; i++) {
+      try {
+        await _reloadCurrentSong();
+        return;
+      } catch (e) {
+        if (i == maxAttempts - 1) rethrow;
+        await Future.delayed(Duration(seconds: pow(2, i) as int));
+      }
+    }
+  }
+}
+```
+
+##### 3. 播放URL失效边界
+**场景**: QQ Music URL 有时效性 (通常1-2小时)
+
+**当前问题**: 用户暂停后长时间再继续播放, URL可能失效
+
+**解决方案**:
+```dart
+class PlaybackService {
+  final Map<String, DateTime> _urlTimestamps = {};
+  
+  Future<void> resume() async {
+    final song = currentSong;
+    if (song == null) return;
+    
+    // 检查URL是否过期
+    final timestamp = _urlTimestamps[song.mid];
+    if (timestamp != null && 
+        DateTime.now().difference(timestamp) > Duration(hours: 1)) {
+      // URL可能失效, 重新获取
+      await _reloadSongUrl(song);
+    }
+    
+    await _player.play();
+  }
+  
+  Future<void> _reloadSongUrl(Song song) async {
+    final resp = await api.getSongUrl(song.mid, song.name);
+    if (resp['code'] == 1) {
+      final newUrl = resp['url'];
+      await _player.setUrl(newUrl);
+      _urlTimestamps[song.mid] = DateTime.now();
+    }
+  }
+}
+```
+
+#### C. 同步层
+
+##### 1. WebSocket断线重连边界
+**场景**: 
+- 用户网络闪断
+- 服务端重启
+
+**当前问题**: 断线期间的消息丢失
+
+**完整方案**:
+```dart
+// 客户端
+class WebSocketManager {
+  int _reconnectAttempts = 0;
+  DateTime? _lastDisconnectTime;
+  
+  void _reconnect() {
+    _reconnectAttempts++;
+    
+    // 指数退避, 最大30秒
+    final delay = min(pow(2, _reconnectAttempts - 1) * 1000, 30000);
+    
+    Timer(Duration(milliseconds: delay.toInt()), () async {
+      await connect();
+      
+      if (_connected) {
+        // 重连成功: 拉取离线消息
+        await _fetchOfflineMessages();
+        _reconnectAttempts = 0;
+      }
+    });
+  }
+  
+  Future<void> _fetchOfflineMessages() async {
+    if (_lastDisconnectTime == null) return;
+    
+    // 请求断线期间的消息
+    final messages = await api.getOfflineMessages(
+      since: _lastDisconnectTime!.toIso8601String(),
+    );
+    
+    for (final msg in messages) {
+      _handleMessage(msg);
+    }
+  }
+}
+
+// 服务端
+func (s *SyncService) PushMessage(userID string, msg Message) error {
+    // 1. 推送到所有在线连接
+    connections := s.hub.GetUserConnections(userID)
+    for _, conn := range connections {
+        conn.Send(msg)
+    }
+    
+    // 2. 同时存储到离线队列 (保留24小时)
+    key := fmt.Sprintf("offline:msg:%s", userID)
+    s.rdb.ZAdd(ctx, key, redis.Z{
+        Score:  float64(time.Now().Unix()),
+        Member: msg.Serialize(),
+    })
+    s.rdb.Expire(ctx, key, 24*time.Hour)
+    
+    return nil
+}
+
+// 客户端请求离线消息
+func (h *SyncHandler) GetOfflineMessages(c *gin.Context) {
+    userID := c.GetString("user_id")
+    since := c.Query("since")  // ISO8601 timestamp
+    
+    sinceTime, _ := time.Parse(time.RFC3339, since)
+    msgs := h.svc.GetMessagesAfter(userID, sinceTime)
+    
+    c.JSON(http.StatusOK, msgs)
+}
+```
+
+##### 2. 数据冲突边界
+**场景**: 用户在两台设备同时操作
+
+**示例**:
+- 设备A: 删除收藏 song_1
+- 设备B: 同时删除收藏 song_1
+
+**当前实现**: Last-Write-Wins (最后写入胜出)
+
+**改进方案**:
+```go
+// 1. 幂等性保证
+func (r *FavoriteRepo) RemoveFavorite(userID, targetID string) error {
+    // 软删除: 多次删除同一条记录不报错
+    result := r.db.Exec(`
+        UPDATE favorites 
+        SET deleted_at = NOW() 
+        WHERE user_id = $1 AND target_id = $2 AND deleted_at IS NULL
+    `, userID, targetID)
+    
+    // 即使 affected rows = 0 也返回成功
+    return nil
+}
+
+// 2. 操作时间戳
+type FavoriteOperation struct {
+    UserID    string
+    TargetID  string
+    Action    string    // "add" | "remove"
+    Timestamp time.Time
+    DeviceID  string
+}
+
+// 服务端处理操作时检查时间戳
+func (s *SyncService) HandleFavoriteOp(op FavoriteOperation) error {
+    existing := s.repo.GetFavorite(op.UserID, op.TargetID)
+    
+    if existing != nil {
+        // 已存在记录, 比较时间戳
+        if op.Timestamp.Before(existing.UpdatedAt) {
+            // 旧操作, 忽略
+            return nil
+        }
+    }
+    
+    // 应用操作
+    if op.Action == "remove" {
+        return s.repo.RemoveFavorite(op.UserID, op.TargetID)
+    }
+    return s.repo.AddFavorite(op.UserID, op.TargetID)
+}
+```
+
+##### 3. 大量数据同步边界
+**场景**: 新设备登录, 需同步所有数据
+
+**当前问题**: 一次性加载所有收藏/歌单, 可能很慢
+
+**改进**:
+```dart
+// 1. 分页同步
+class SyncService {
+  Future<void> syncAllFavorites() async {
+    int page = 1;
+    const pageSize = 100;
+    
+    while (true) {
+      final batch = await api.getFavorites(page: page, size: pageSize);
+      
+      if (batch.isEmpty) break;
+      
+      // 批量写入本地数据库
+      await localDb.insertFavorites(batch);
+      
+      // 更新UI
+      notifyListeners();
+      
+      page++;
+    }
+  }
+}
+
+// 2. 增量同步
+// 只同步上次同步后的变更
+Future<void> incrementalSync() async {
+  final lastSyncTime = await getLastSyncTime();
+  
+  final changes = await api.getChanges(since: lastSyncTime);
+  
+  for (final change in changes) {
+    if (change.action == 'add') {
+      await localDb.insertFavorite(change.data);
+    } else if (change.action == 'remove') {
+      await localDb.deleteFavorite(change.data.id);
+    }
+  }
+  
+  await setLastSyncTime(DateTime.now());
+}
+```
+
+#### D. 管理层
+
+##### 1. 配置热更新边界
+**场景**: 修改 `USER_JWT_SECRET`, 所有RT失效
+
+**当前实现**: 
+1. 批量删除所有RT
+2. 广播 `config.jwt_rotated` 事件
+
+**边界情况**:
+- 正在刷新Token的请求
+- 离线用户
+
+**改进**:
+```go
+// 1. JWT版本号机制
+type Claims struct {
+    UserID     string
+    TokenVersion int  // 新增
+    ExpiresAt  int64
+}
+
+// system_configs 表增加版本号
+INSERT INTO system_configs (key, value, version) 
+VALUES ('USER_JWT_SECRET', encrypt(secret), 1);
+
+// 验证Token时检查版本
+func (j *JWTService) Verify(token string) (*Claims, error) {
+    claims, err := jwt.Parse(token)
+    if err != nil { return nil, err }
+    
+    currentVersion := j.cfgSvc.GetInt("JWT_VERSION")
+    if claims.TokenVersion < currentVersion {
+        return nil, ErrTokenVersionMismatch
+    }
+    
+    return claims, nil
+}
+
+// 更新密钥时递增版本号
+func (h *ConfigHandler) rotateJWTSecret() error {
+    newSecret := crypto.GenSecret(32)
+    currentVersion := h.cfgSvc.GetInt("JWT_VERSION")
+    
+    h.cfgSvc.Set("USER_JWT_SECRET", newSecret)
+    h.cfgSvc.Set("JWT_VERSION", currentVersion + 1)
+    
+    // 旧版本Token在TTL后自然过期, 无需立即删除RT
+}
+
+// 2. 灰度更新
+// 支持新旧两个密钥并存24小时
+func (j *JWTService) VerifyWithFallback(token string) (*Claims, error) {
+    // 先用新密钥验证
+    claims, err := j.verifyWithSecret(token, j.currentSecret)
+    if err == nil { return claims, nil }
+    
+    // 失败则用旧密钥验证 (24小时内有效)
+    if time.Since(j.secretRotatedAt) < 24*time.Hour {
+        return j.verifyWithSecret(token, j.previousSecret)
+    }
+    
+    return nil, ErrInvalidToken
+}
+```
+
+##### 2. 批量操作边界
+**场景**: 管理员批量禁用100个用户
+
+**当前问题**: 
+- 操作耗时长
+- 部分失败时没有回滚
+- 没有进度反馈
+
+**改进**:
+```go
+// 1. 异步批量操作
+type BatchOperation struct {
+    ID          string
+    Type        string  // "disable_users" | "delete_favorites"
+    TargetIDs   []string
+    Status      string  // "pending" | "in_progress" | "completed" | "failed"
+    Progress    int     // 0-100
+    CreatedAt   time.Time
+    CompletedAt *time.Time
+}
+
+// 创建批量任务
+func (h *UserHandler) BatchDisableUsers(c *gin.Context) {
+    var req struct {
+        UserIDs []string `json:"user_ids"`
+    }
+    c.BindJSON(&req)
+    
+    // 创建异步任务
+    op := &BatchOperation{
+        ID:        uuid.New().String(),
+        Type:      "disable_users",
+        TargetIDs: req.UserIDs,
+        Status:    "pending",
+    }
+    h.batchRepo.CreateOperation(op)
+    
+    // 后台执行
+    go h.executeBatchDisable(op)
+    
+    c.JSON(http.StatusAccepted, gin.H{
+        "operation_id": op.ID,
+        "status": "accepted",
+    })
+}
+
+// 异步执行 + 进度更新
+func (h *UserHandler) executeBatchDisable(op *BatchOperation) {
+    h.batchRepo.UpdateStatus(op.ID, "in_progress")
+    
+    total := len(op.TargetIDs)
+    for i, userID := range op.TargetIDs {
+        if err := h.userRepo.DisableUser(userID); err != nil {
+            h.log.Error("batch disable failed", zap.String("user_id", userID))
+        }
+        
+        // 更新进度
+        progress := int(float64(i+1) / float64(total) * 100)
+        h.batchRepo.UpdateProgress(op.ID, progress)
+    }
+    
+    now := time.Now()
+    h.batchRepo.UpdateOperation(op.ID, BatchOperation{
+        Status:      "completed",
+        Progress:    100,
+        CompletedAt: &now,
+    })
+}
+
+// 前端轮询进度
+GET /admin/operations/:id
+{
+  "operation_id": "xxx",
+  "type": "disable_users",
+  "status": "in_progress",
+  "progress": 45,
+  "total": 100,
+  "completed": 45
+}
+```
+
+### 4.2 安全案例 (Security)
+
+#### A. 认证安全
+
+##### 1. 暴力破解防护
+**场景**: 攻击者尝试暴力破解验证码
+
+**防护措施**:
+```go
+// 1. 验证码错误次数限制
+func (s *SMSService) Verify(phone, code string) error {
+    key := fmt.Sprintf("sms:fail:%s", phone)
+    
+    // 检查失败次数
+    failCount, _ := s.rdb.Get(ctx, key).Int()
+    if failCount >= 5 {
+        // 超过5次, 锁定10分钟
+        return ErrTooManyAttempts
+    }
+    
+    // 验证码校验
+    if !s.isValidCode(phone, code) {
+        // 失败次数+1
+        s.rdb.Incr(ctx, key)
+        s.rdb.Expire(ctx, key, 10*time.Minute)
+        return ErrInvalidCode
+    }
+    
+    // 验证成功, 清除失败计数
+    s.rdb.Del(ctx, key)
+    return nil
+}
+
+// 2. 图形验证码 (高风险场景)
+// 发送短信前要求输入图形验证码
+func (h *AuthHandler) SendSMS(c *gin.Context) {
+    phone := c.PostForm("phone")
+    captchaCode := c.PostForm("captcha")
+    
+    // 验证图形验证码
+    if !h.captchaSvc.Verify(c.ClientIP(), captchaCode) {
+        c.JSON(http.StatusBadRequest, gin.H{"error": "captcha invalid"})
+        return
+    }
+    
+    // 发送短信
+    // ...
+}
+
+// 3. 频率限制
+// 单IP每天最多发送10次短信
+key := fmt.Sprintf("sms:daily:%s", clientIP)
+count, _ := rdb.Incr(ctx, key).Result()
+if count == 1 {
+    rdb.Expire(ctx, key, 24*time.Hour)
+}
+if count > 10 {
+    return ErrDailyLimitExceeded
+}
+```
+
+##### 2. Token劫持防护
+**场景**: 攻击者窃取用户的JWT Token
+
+**防护措施**:
+```go
+// 1. Token绑定User-Agent (可选)
+type Claims struct {
+    UserID    string
+    DeviceID  string
+    UserAgent string  // 新增
+}
+
+func (j *JWTService) Verify(token, userAgent string) (*Claims, error) {
+    claims, err := jwt.Parse(token)
+    if err != nil { return nil, err }
+    
+    // 严格模式: 检查 User-Agent 是否匹配
+    if j.strictMode && claims.UserAgent != userAgent {
+        return nil, ErrUserAgentMismatch
+    }
+    
+    return claims, nil
+}
+
+// 2. Refresh Token 单次使用 (Token Rotation)
+func (j *JWTService) RefreshToken(oldRT string) (string, string, error) {
+    // 验证旧RT
+    claims, err := j.VerifyRefreshToken(oldRT)
+    if err != nil { return "", "", err }
+    
+    // 删除旧RT (防止重放攻击)
+    oldRTHash := sha256Hash(oldRT)
+    if err := j.repo.DeleteRT(oldRTHash); err != nil {
+        return "", "", ErrRTAlreadyUsed
+    }
+    
+    // 签发新的 AT + RT
+    newAT := j.SignAccessToken(claims)
+    newRT := j.SignRefreshToken(claims)
+    newRTHash := sha256Hash(newRT)
+    
+    // 存储新RT
+    j.repo.SaveRT(claims.UserID, claims.DeviceID, newRTHash)
+    
+    return newAT, newRT, nil
+}
+
+// 检测到RT重用 → 可能被劫持 → 注销该用户所有Token
+func (j *JWTService) OnRTReuseDetected(userID string) {
+    j.log.Warn("RT reuse detected", zap.String("user_id", userID))
+    
+    // 删除该用户所有设备的RT
+    j.repo.DeleteAllRTsForUser(userID)
+    
+    // 发送安全告警
+    j.notifySvc.SendSecurityAlert(userID, "检测到异常登录行为，已注销所有设备")
+}
+```
+
+##### 3. 会话固定攻击防护
+**场景**: 攻击者诱导用户使用攻击者的Session ID
+
+**防护措施**:
+```go
+// 登录后更换 Session ID / Device ID
+func (h *AuthHandler) VerifySMS(c *gin.Context) {
+    // 验证成功
+    user := h.getUserByPhone(phone)
+    
+    // 旧的 device_id 可能被攻击者知道, 重新生成
+    newDeviceID := uuid.New().String()
+    
+    device := &Device{
+        UserID:   user.ID,
+        DeviceID: newDeviceID,  // 新的 device_id
+        Platform: c.GetHeader("X-Platform"),
+    }
+    h.deviceRepo.CreateDevice(device)
+    
+    // 签发Token
+    at, rt := h.jwtSvc.Sign(user.ID, newDeviceID)
+    
+    c.JSON(http.StatusOK, gin.H{
+        "access_token":  at,
+        "refresh_token": rt,
+        "device_id":     newDeviceID,  // 返回给客户端
+    })
+}
+```
+
+#### B. 数据安全
+
+##### 1. 敏感配置保护
+**当前实现**: AES-256-GCM加密存储
+
+**增强措施**:
+```go
+// 1. 密钥轮换
+func (c *ConfigService) RotateEncryptionKey() error {
+    oldKey := c.encKey
+    newKey := crypto.GenKey(32)
+    
+    // 1. 读取所有配置
+    configs := c.getAllConfigs()
+    
+    // 2. 用旧密钥解密
+    decrypted := make(map[string]string)
+    for k, v := range configs {
+        plaintext, err := crypto.DecryptAES(v, oldKey)
+        if err != nil { return err }
+        decrypted[k] = plaintext
+    }
+    
+    // 3. 用新密钥加密
+    for k, v := range decrypted {
+        ciphertext, _ := crypto.EncryptAES(v, newKey)
+        c.updateConfigRaw(k, ciphertext)
+    }
+    
+    // 4. 更新服务使用的密钥
+    c.encKey = newKey
+    
+    return nil
+}
+
+// 2. 密钥分片 (Shamir's Secret Sharing)
+// 密钥分成3片, 至少2片才能恢复
+// 适用于超级敏感场景 (如数据库root密码)
+```
+
+##### 2. SQL注入防护
+**当前实现**: sqlc生成的参数化查询
+
+**验证**:
+```go
+// ✅ 安全: 使用参数化查询
+func (r *UserRepo) GetUser(phone string) (*User, error) {
+    var user User
+    err := r.db.QueryRow(`
+        SELECT id, phone, role FROM users WHERE phone = $1
+    `, phone).Scan(&user.ID, &user.Phone, &user.Role)
+    return &user, err
+}
+
+// ❌ 危险: 字符串拼接
+func (r *UserRepo) GetUserUnsafe(phone string) (*User, error) {
+    query := "SELECT * FROM users WHERE phone = '" + phone + "'"  // 易受注入攻击
+    // ...
+}
+```
+
+**边界情况**: 动态查询
+
+```go
+// 场景: 用户管理页面, 可按多个条件筛选
+func (r *UserRepo) SearchUsers(filters map[string]string) ([]User, error) {
+    query := "SELECT * FROM users WHERE 1=1"
+    args := []interface{}{}
+    argIndex := 1
+    
+    // ✅ 安全做法: 白名单 + 参数化
+    allowedFilters := map[string]bool{
+        "role":     true,
+        "disabled": true,
+    }
+    
+    for k, v := range filters {
+        if !allowedFilters[k] {
+            continue  // 忽略不在白名单的字段
+        }
+        
+        query += fmt.Sprintf(" AND %s = $%d", k, argIndex)
+        args = append(args, v)
+        argIndex++
+    }
+    
+    rows, err := r.db.Query(query, args...)
+    // ...
+}
+```
+
+##### 3. XSS防护 (客户端)
+**场景**: 显示用户输入的歌单名称
+
+**防护措施**:
+```dart
+// 1. Flutter Text组件默认转义, 无XSS风险
+Text(playlistName)  // 自动转义 <script>alert(1)</script>
+
+// 2. 如使用 HTML 渲染 (如歌词), 必须sanitize
+import 'package:html/parser.dart' as html;
+
+String sanitizeHtml(String input) {
+  final document = html.parse(input);
+  
+  // 白名单标签
+  final allowedTags = ['b', 'i', 'br', 'p'];
+  
+  document.querySelectorAll('*').forEach((element) {
+    if (!allowedTags.contains(element.localName)) {
+      element.remove();
+    }
+  });
+  
+  return document.body?.innerHtml ?? '';
+}
+
+// 3. Admin Web (React)
+// 使用 DOMPurify 库
+import DOMPurify from 'dompurify';
+
+function DisplayUserInput({ content }) {
+  const clean = DOMPurify.sanitize(content);
+  return <div dangerouslySetInnerHTML={{ __html: clean }} />;
+}
+```
+
+#### C. 接口安全
+
+##### 1. CSRF防护
+**当前状态**: 纯API, 使用JWT, 无需CSRF Token
+
+**说明**:
+- CSRF主要威胁基于Cookie的认证
+- JWT存储在 localStorage/secureStorage, 不会自动发送
+- 但Admin Web如果使用Cookie, 需要CSRF保护
+
+**Admin Web CSRF防护**:
+```typescript
+// 1. 双重Cookie模式
+// 登录时服务端设置两个Cookie:
+// - session_id (HttpOnly, 用于认证)
+// - csrf_token (可读, 用于验证)
+
+// 2. 客户端请求时带上 csrf_token
+axios.interceptors.request.use(config => {
+  const csrfToken = getCookie('csrf_token');
+  if (csrfToken) {
+    config.headers['X-CSRF-Token'] = csrfToken;
+  }
+  return config;
+});
+
+// 3. 服务端验证
+func (m *CSRFMiddleware) Verify(c *gin.Context) {
+    csrfCookie, _ := c.Cookie("csrf_token")
+    csrfHeader := c.GetHeader("X-CSRF-Token")
+    
+    if csrfCookie == "" || csrfHeader == "" || csrfCookie != csrfHeader {
+        c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "CSRF token mismatch"})
+        return
+    }
+    
+    c.Next()
+}
+```
+
+##### 2. DDoS防护
+**当前状态**: 无专门防护
+
+**分层防护**:
+```
+1. 云服务商层 (Cloudflare / AWS Shield)
+   - 全球CDN
+   - L3/L4 DDoS防护
+   - IP黑名单
+
+2. 网关层 (Nginx / Kong)
+   - 限流: limit_req_zone
+   - 连接限制: limit_conn_zone
+   
+   http {
+       limit_req_zone $binary_remote_addr zone=one:10m rate=10r/s;
+       limit_conn_zone $binary_remote_addr zone=addr:10m;
+       
+       server {
+           limit_req zone=one burst=20 nodelay;
+           limit_conn addr 10;
+       }
+   }
+
+3. 应用层 (Go middleware)
+   import "github.com/ulule/limiter/v3"
+   
+   // IP限流
+   rate := limiter.Rate{
+       Period: time.Minute,
+       Limit:  100,
+   }
+   middleware := mgin.NewMiddleware(limiter.New(..., rate))
+   router.Use(middleware)
+   
+   // 用户限流 (基于user_id)
+   userLimiter := NewUserRateLimiter(50, time.Minute)
+   
+   func (m *UserLimiter) Check(userID string) error {
+       key := fmt.Sprintf("ratelimit:user:%s", userID)
+       count := rdb.Incr(ctx, key).Val()
+       if count == 1 {
+           rdb.Expire(ctx, key, time.Minute)
+       }
+       if count > 50 {
+           return ErrRateLimitExceeded
+       }
+       return nil
+   }
+
+4. 数据库层
+   - pgBouncer连接池
+   - 慢查询监控
+   - 语句超时设置
+   
+   SET statement_timeout = '5s';
+```
+
+##### 3. API滥用防护
+**场景**: 
+- 爬虫大量爬取数据
+- 恶意用户频繁创建/删除歌单
+
+**防护措施**:
+```go
+// 1. API Key白名单 (合作方)
+func (m *APIKeyMiddleware) Verify(c *gin.Context) {
+    apiKey := c.GetHeader("X-API-Key")
+    
+    if apiKey == "" {
+        // 普通用户: 严格限流
+        if err := rateLimiter.Check(c.ClientIP(), 100, time.Hour); err != nil {
+            c.AbortWithStatusJSON(http.StatusTooManyRequests, ...)
+            return
+        }
+    } else {
+        // 合作方: 宽松限流 + 审计
+        if !m.isValidAPIKey(apiKey) {
+            c.AbortWithStatus(http.StatusUnauthorized)
+            return
+        }
+        
+        auditLog.Record(apiKey, c.Request.URL.Path)
+        
+        if err := rateLimiter.Check(apiKey, 10000, time.Hour); err != nil {
+            c.AbortWithStatusJSON(http.StatusTooManyRequests, ...)
+            return
+        }
+    }
+    
+    c.Next()
+}
+
+// 2. 行为分析
+type UserBehaviorAnalyzer struct {
+    // 统计用户操作频率
+    // 识别异常模式: 短时间大量操作
+}
+
+func (a *UserBehaviorAnalyzer) CheckAnomalous(userID string, action string) bool {
+    key := fmt.Sprintf("behavior:%s:%s", userID, action)
+    
+    // 统计最近1分钟的操作次数
+    count := rdb.IncrBy(ctx, key, 1).Val()
+    if count == 1 {
+        rdb.Expire(ctx, key, time.Minute)
+    }
+    
+    // 阈值
+    thresholds := map[string]int64{
+        "create_playlist": 5,   // 1分钟最多创建5个歌单
+        "add_favorite":    50,  // 1分钟最多收藏50首歌
+        "delete_favorite": 100, // 1分钟最多取消100个收藏
+    }
+    
+    threshold := thresholds[action]
+    if count > threshold {
+        // 记录异常行为
+        a.logAnomalous(userID, action, count)
+        return true
+    }
+    
+    return false
+}
+
+// 3. 验证码挑战 (CAPTCHA)
+// 检测到异常行为后, 要求输入验证码
+if analyzer.CheckAnomalous(userID, "create_playlist") {
+    c.JSON(http.StatusTooManyRequests, gin.H{
+        "code": "CAPTCHA_REQUIRED",
+        "message": "操作过于频繁，请输入验证码",
+        "captcha_id": generateCaptcha(),
+    })
+    return
+}
+```
+
+#### D. 基础设施安全
+
+##### 1. 数据库安全
+**措施**:
+```sql
+-- 1. 最小权限原则
+-- 应用使用的数据库用户只有必要权限
+CREATE USER listen_app WITH PASSWORD 'xxx';
+
+-- auth-svc: 只需访问 users, devices 表
+GRANT SELECT, INSERT, UPDATE ON users, devices TO listen_app;
+
+-- sync-svc: 需要访问 favorites, history, user_playlists
+GRANT SELECT, INSERT, UPDATE, DELETE ON favorites, history, user_playlists, playlist_songs TO listen_app;
+
+-- 禁止 DROP, TRUNCATE
+REVOKE DROP, TRUNCATE ON ALL TABLES IN SCHEMA public FROM listen_app;
+
+-- 2. 数据加密
+-- TLS连接
+DATABASE_URL=postgres://user:pass@host:5432/db?sslmode=require
+
+-- 敏感字段加密 (system_configs.value 已加密)
+
+-- 3. 审计日志
+-- 启用 PostgreSQL 审计扩展 pgAudit
+CREATE EXTENSION pgaudit;
+
+-- 记录所有 DDL 操作
+ALTER SYSTEM SET pgaudit.log = 'ddl';
+
+-- 4. 备份
+-- 每日全量备份 + WAL归档
+pg_dump listen_stream > backup_$(date +%Y%m%d).sql
+
+-- 异地备份
+aws s3 cp backup_*.sql s3://listen-stream-backups/
+```
+
+##### 2. Redis安全
+**措施**:
+```bash
+# 1. 密码认证
+# redis.conf
+requirepass strong_password_here
+
+# 客户端连接
+redis-cli -a strong_password_here
+
+# 2. 禁用危险命令
+rename-command FLUSHDB ""
+rename-command FLUSHALL ""
+rename-command KEYS ""
+rename-command CONFIG "CONFIG_xxx"  # 重命名
+
+# 3. 绑定内网IP
+bind 127.0.0.1 10.0.0.5  # 只监听本地和内网
+
+# 4. 开启持久化
+appendonly yes
+appendfsync everysec
+
+# 5. 限制内存
+maxmemory 2gb
+maxmemory-policy allkeys-lru  # 内存满时淘汰最少使用的key
+```
+
+##### 3. 日志安全
+**当前问题**: 日志可能包含敏感信息
+
+**改进**:
+```go
+// 1. 日志脱敏
+func maskSensitive(s string) string {
+    // 手机号: 138****5678
+    phoneRegex := regexp.MustCompile(`1[3-9]\d{9}`)
+    s = phoneRegex.ReplaceAllStringFunc(s, func(phone string) string {
+        return phone[:3] + "****" + phone[7:]
+    })
+    
+    // JWT Token: 只记录前8位
+    if len(s) > 20 {
+        return s[:8] + "..." + s[len(s)-8:]
+    }
+    
+    return s
+}
+
+// 使用
+logger.Info("user login", 
+    zap.String("phone", maskSensitive(phone)),
+    zap.String("token", maskSensitive(token)),
+)
+
+// 2. 结构化日志 (便于解析和告警)
+type SecurityEvent struct {
+    EventType  string    `json:"event_type"`  // "login_failed" | "token_expired"
+    UserID     string    `json:"user_id"`
+    IP         string    `json:"ip"`
+    Timestamp  time.Time `json:"timestamp"`
+    Details    map[string]interface{} `json:"details"`
+}
+
+logger.Info("security_event", zap.Any("event", SecurityEvent{
+    EventType: "login_failed",
+    UserID:    userID,
+    IP:        clientIP,
+    Timestamp: time.Now(),
+    Details:   map[string]interface{}{"reason": "invalid_code"},
+}))
+
+// 3. 日志审计
+// 定期检查日志中的安全事件
+// 检测异常模式: 大量登录失败、Token过期、异地登录等
+```
+
+---
+
+## 5. 技术债务清单
+
+### 5.1 紧急修复 (P0)
+
+| 问题 | 影响 | 解决方案 |
+|------|------|----------|
+| **播放URL无重试机制** | 用户体验差, 网络抖动时播放失败 | 增加指数退避重试 |
+| **WebSocket无心跳** | 连接僵死, 消息无法推送 | 实现心跳+超时检测 |
+| **配置热更新延迟30秒** | API配置变更不及时生效 | 增加配置变更通知机制 |
+
+### 5.2 重要优化 (P1)
+
+| 问题 | 影响 | 解决方案 |
+|------|------|----------|
+| **缓存无预热机制** | 冷启动慢 | 启动时预加载热点数据 |
+| **无熔断器** | 上游故障级联 | 引入 Circuit Breaker |
+| **无链路追踪** | 跨服务调试困难 | OpenTelemetry + Jaeger |
+| **JWT Token无版本控制** | 密钥轮换影响大 | 增加 token_version 字段 |
+
+### 5.3 性能优化 (P2)
+
+| 问题 | 影响 | 解决方案 |
+|------|------|----------|
+| **图片加载优化不足** | 客户端内存占用高 | 限制缓存尺寸 + 虚拟滚动 |
+| **数据统计实时查询** | Dashboard慢 | 定时聚合 + 读取汇总表 |
+| **离线功能弱** | 断网后无法使用 | 增强本地缓存 + ETag |
+
+### 5.4 架构改进 (P3)
+
+| 问题 | 影响 | 解决方案 |
+|------|------|----------|
+| **单体缓存** | 缓存穿透风险 | 分级缓存 (内存 + Redis) |
+| **配置分散** | 管理混乱 | 统一配置中心 |
+| **无服务注册** | 服务地址硬编码 | Consul / etcd |
+
+---
+
+## 6. 总结
+
+### 6.1 项目优势
+1. **架构清晰**: 微服务职责明确, 独立部署
+2. **技术栈现代**: Go + Flutter + React, 跨平台支持好
+3. **安全设计**: 敏感配置加密, JWT认证, 操作审计
+4. **缓存优化**: 多级缓存 + stale降级
+5. **用户体验**: 实时同步 + 播放fallback
+
+### 6.2 改进优先级
+
+**立即执行** (1-2周):
+- 播放重试机制
+- WebSocket心跳
+- 日志脱敏
+
+**近期优化** (1个月):
+- 熔断器
+- 链路追踪
+- 缓存预热
+- Token版本控制
+
+**长期规划** (3个月):
+- 服务注册与发现
+- 配置中心
+- 可观测性平台 (Grafana + Prometheus)
+- K8s部署
+
+### 6.3 最终评价
+
+**整体评分**: ⭐⭐⭐⭐ (4/5)
+
+**评语**: 
+这是一个架构设计合理、代码质量较高的音乐流媒体项目。微服务拆分清晰, 技术选型得当, 安全措施到位。主要不足在于缺少生产级的运维配套 (链路追踪、熔断器、配置中心等), 以及部分边界情况处理不够完善。建议按优先级逐步优化, 重点关注稳定性和可观测性建设。
+
+---
+
+**报告完成时间**: 2026-02-23  
+**分析工具**: Manual Code Review + Architecture Analysis  
+**报告作者**: AI Assistant (Claude Sonnet 4.5)

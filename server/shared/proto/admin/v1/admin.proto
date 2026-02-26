@@ -1,0 +1,349 @@
+syntax = "proto3";
+
+package admin.v1;
+
+option go_package = "github.com/listen-stream/server/shared/proto/admin/v1;adminv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// AdminService provides management and monitoring capabilities.
+//
+// All RPCs require admin authentication and are audited.
+service AdminService {
+  // GetSystemStats returns real-time system statistics.
+  rpc GetSystemStats(GetSystemStatsRequest) returns (GetSystemStatsResponse);
+  
+  // GetUserInfo retrieves detailed user information for admin purposes.
+  rpc GetUserInfo(GetUserInfoRequest) returns (GetUserInfoResponse);
+  
+  // DisableUser disables a user account.
+  rpc DisableUser(DisableUserRequest) returns (DisableUserResponse);
+  
+  // EnableUser re-enables a disabled user account.
+  rpc EnableUser(EnableUserRequest) returns (EnableUserResponse);
+  
+  // ListOperationLogs returns paginated operation logs.
+  rpc ListOperationLogs(ListOperationLogsRequest) returns (ListOperationLogsResponse);
+  
+  // ExportOperationLogs exports logs in CSV/Excel format.
+  rpc ExportOperationLogs(ExportOperationLogsRequest) returns (ExportOperationLogsResponse);
+}
+
+// GetSystemStatsRequest can optionally specify a time range.
+message GetSystemStatsRequest {
+  // Optional: start time for historical stats
+  google.protobuf.Timestamp start_time = 1;
+  
+  // Optional: end time for historical stats
+  google.protobuf.Timestamp end_time = 2;
+}
+
+// GetSystemStatsResponse contains system statistics.
+message GetSystemStatsResponse {
+  // Current real-time metrics
+  RealTimeMetrics realtime = 1;
+  
+  // Historical daily statistics (if time range provided)
+  repeated DailyStat daily_stats = 2;
+}
+
+// GetUserInfoRequest specifies which user to query.
+message GetUserInfoRequest {
+  // User ID or phone number
+  string identifier = 1;
+}
+
+// GetUserInfoResponse contains detailed user information.
+message GetUserInfoResponse {
+  // User basic info
+  UserInfo user = 1;
+  
+  // Active devices
+  repeated DeviceInfo devices = 2;
+  
+  // Usage statistics
+  UsageStats stats = 3;
+}
+
+// DisableUserRequest specifies which user to disable.
+message DisableUserRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Reason for disabling (for audit)
+  string reason = 2;
+  
+  // Admin ID performing the action
+  string admin_id = 3;
+}
+
+// DisableUserResponse confirms the action.
+message DisableUserResponse {
+  // Whether the operation was successful
+  bool success = 1;
+  
+  // Number of tokens revoked
+  int32 tokens_revoked = 2;
+}
+
+// EnableUserRequest specifies which user to re-enable.
+message EnableUserRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Admin ID performing the action
+  string admin_id = 2;
+}
+
+// EnableUserResponse confirms the action.
+message EnableUserResponse {
+  // Whether the operation was successful
+  bool success = 1;
+}
+
+// ListOperationLogsRequest specifies pagination and filtering.
+message ListOperationLogsRequest {
+  // Optional: filter by admin ID
+  string admin_id = 1;
+  
+  // Optional: filter by action type
+  string action = 2;
+  
+  // Optional: time range start
+  google.protobuf.Timestamp start_time = 3;
+  
+  // Optional: time range end
+  google.protobuf.Timestamp end_time = 4;
+  
+  // Pagination: page number (1-based)
+  int32 page = 5;
+  
+  // Pagination: items per page (default: 20, max: 100)
+  int32 page_size = 6;
+}
+
+// ListOperationLogsResponse contains paginated logs.
+message ListOperationLogsResponse {
+  // List of operation logs
+  repeated OperationLog logs = 1;
+  
+  // Total count
+  int32 total = 2;
+  
+  // Current page
+  int32 page = 3;
+  
+  // Page size
+  int32 page_size = 4;
+}
+
+// ExportOperationLogsRequest specifies export parameters.
+message ExportOperationLogsRequest {
+  // Export format
+  ExportFormat format = 1;
+  
+  // Optional: filter by admin ID
+  string admin_id = 2;
+  
+  // Optional: time range start
+  google.protobuf.Timestamp start_time = 3;
+  
+  // Optional: time range end
+  google.protobuf.Timestamp end_time = 4;
+}
+
+// ExportOperationLogsResponse contains the exported file.
+message ExportOperationLogsResponse {
+  // Download URL (signed, expires in 1 hour)
+  string download_url = 1;
+  
+  // File size in bytes
+  int64 file_size = 2;
+  
+  // Number of records exported
+  int32 record_count = 3;
+}
+
+// RealTimeMetrics contains current system metrics.
+message RealTimeMetrics {
+  // Total registered users
+  int32 total_users = 1;
+  
+  // Active users (today)
+  int32 active_users_today = 2;
+  
+  // Total favorites
+  int32 total_favorites = 3;
+  
+  // Total playlists
+  int32 total_playlists = 4;
+  
+  // Total play history records
+  int32 total_history = 5;
+  
+  // Active WebSocket connections
+  int32 active_connections = 6;
+  
+  // Current QPS
+  int32 current_qps = 7;
+  
+  // Error rate (last 5 minutes)
+  float error_rate = 8;
+  
+  // P99 latency (last 5 minutes, in ms)
+  float p99_latency = 9;
+}
+
+// DailyStat contains daily aggregated statistics.
+message DailyStat {
+  // Date (YYYY-MM-DD)
+  string date = 1;
+  
+  // Total users (cumulative)
+  int32 total_users = 2;
+  
+  // Active users (daily)
+  int32 active_users = 3;
+  
+  // New registrations
+  int32 new_users = 4;
+  
+  // Total favorites
+  int32 total_favorites = 5;
+  
+  // Total playlists
+  int32 total_playlists = 6;
+  
+  // Total history records
+  int32 total_history = 7;
+  
+  // SMS sent count
+  int32 sms_sent = 8;
+  
+  // SMS failed count
+  int32 sms_failed = 9;
+  
+  // API call count
+  int32 api_calls = 10;
+  
+  // Error rate
+  float error_rate = 11;
+}
+
+// UserInfo contains detailed user information.
+message UserInfo {
+  // User ID
+  string id = 1;
+  
+  // Phone number
+  string phone = 2;
+  
+  // User role
+  string role = 3;
+  
+  // Whether disabled
+  bool disabled = 4;
+  
+  // Token version
+  int32 token_version = 5;
+  
+  // Account creation time
+  google.protobuf.Timestamp created_at = 6;
+  
+  // Last login time
+  google.protobuf.Timestamp last_login_at = 7;
+}
+
+// DeviceInfo contains device information.
+message DeviceInfo {
+  // Device ID
+  string id = 1;
+  
+  // Platform
+  string platform = 2;
+  
+  // IP address
+  string ip_address = 3;
+  
+  // Last active time
+  google.protobuf.Timestamp last_active = 4;
+  
+  // Device creation time
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// UsageStats contains user usage statistics.
+message UsageStats {
+  // Total favorites count
+  int32 favorite_count = 1;
+  
+  // Total playlists count
+  int32 playlist_count = 2;
+  
+  // Play history count
+  int32 history_count = 3;
+  
+  // Total play time (seconds)
+  int64 total_play_time = 4;
+  
+  // Login count
+  int32 login_count = 5;
+}
+
+// OperationLog represents an admin operation.
+message OperationLog {
+  // Log ID
+  string id = 1;
+  
+  // Admin ID
+  string admin_id = 2;
+  
+  // Admin username
+  string admin_username = 3;
+  
+  // Action type
+  string action = 4;
+  
+  // Target type (user, config, device, etc.)
+  string target_type = 5;
+  
+  // Target ID
+  string target_id = 6;
+  
+  // Before data (JSON)
+  google.protobuf.Struct before_data = 7;
+  
+  // After data (JSON)
+  google.protobuf.Struct after_data = 8;
+  
+  // Request ID (for tracing)
+  string request_id = 9;
+  
+  // IP address
+  string ip_address = 10;
+  
+  // User agent
+  string user_agent = 11;
+  
+  // Status (success, failed)
+  string status = 12;
+  
+  // Error message (if failed)
+  string error_message = 13;
+  
+  // Timestamp
+  google.protobuf.Timestamp created_at = 14;
+}
+
+// ExportFormat defines export file formats.
+enum ExportFormat {
+  // Default format (should not be used)
+  EXPORT_FORMAT_UNSPECIFIED = 0;
+  
+  // CSV format
+  EXPORT_FORMAT_CSV = 1;
+  
+  // Excel format
+  EXPORT_FORMAT_EXCEL = 2;
+}

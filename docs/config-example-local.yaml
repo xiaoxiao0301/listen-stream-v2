@@ -1,0 +1,106 @@
+# 基础设施配置示例
+# 存储位置: server/services/auth-svc/config/local.yaml
+# 说明: PostgreSQL和Redis配置写在文件中，其余配置在Consul KV
+
+# PostgreSQL数据库配置
+postgres:
+  host: localhost
+  port: 5432
+  database: listen_stream
+  user: postgres
+  password: postgres123
+  
+  # 连接池配置
+  max_connections: 100
+  max_idle_connections: 10
+  max_lifetime_minutes: 60
+  
+  # SSL配置
+  ssl_mode: disable  # disable | require | verify-ca | verify-full
+  
+  # 读写分离（可选）
+  read_replicas:
+    - host: localhost
+      port: 5433
+    - host: localhost
+      port: 5434
+
+# Redis配置
+redis:
+  # 单机模式
+  # address: localhost:6379
+  
+  # 集群模式
+  cluster:
+    addresses:
+      - localhost:6379
+      - localhost:6380
+      - localhost:6381
+      - localhost:6382
+      - localhost:6383
+      - localhost:6384
+  
+  password: ""
+  db: 0
+  
+  # 连接池配置
+  pool_size: 50
+  min_idle_conns: 10
+  
+  # 超时配置
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+  
+  # 重试配置
+  max_retries: 3
+
+# 服务配置
+service:
+  name: auth-svc
+  
+  # HTTP服务端口(客户端调用)
+  http_port: 8001
+  
+  # gRPC服务端口(内部服务间调用)
+  grpc_port: 9001
+  
+  # 运行环境
+  environment: local  # local | staging | production
+  
+  # 日志配置
+  log_level: debug    # debug | info | warn | error
+  log_format: json    # json | text
+  
+  # 优雅关闭超时
+  shutdown_timeout: 30s
+
+# Consul配置(用于读取业务配置和服务注册)
+consul:
+  address: localhost:8500
+  
+  # 配置命名空间
+  config_namespace: listen-stream
+  
+  # 服务注册
+  service_registration:
+    enabled: true
+    health_check_interval: 10s
+    deregister_critical_service_after: 30s
+  
+  # 配置缓存TTL
+  config_cache_ttl: 30s
+
+# OpenTelemetry配置(可选)
+telemetry:
+  enabled: true
+  
+  # Jaeger导出器
+  jaeger:
+    endpoint: http://localhost:14268/api/traces
+  
+  # 采样率(0.0-1.0)
+  sampling_rate: 1.0
+  
+  # 服务名称
+  service_name: auth-svc

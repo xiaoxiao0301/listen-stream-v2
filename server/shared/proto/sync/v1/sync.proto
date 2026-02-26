@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package sync.v1;
+
+option go_package = "github.com/listen-stream/server/shared/proto/sync/v1;syncv1";
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+// SyncService manages real-time synchronization of user data across devices.
+//
+// While WebSocket connections are handled via HTTP, this service provides
+// RPCs for triggering sync events and managing offline messages.
+service SyncService {
+  // TriggerSync broadcasts a sync event to all connected devices for a user.
+  //
+  // Called by other services (user-svc, auth-svc) when data changes.
+  rpc TriggerSync(TriggerSyncRequest) returns (TriggerSyncResponse);
+  
+  // GetOfflineMessages retrieves messages queued while the user was offline.
+  //
+  // Called when a client reconnects to catch up on missed events.
+  rpc GetOfflineMessages(GetOfflineMessagesRequest) returns (GetOfflineMessagesResponse);
+  
+  // AckMessage acknowledges receipt of a message, removing it from the offline queue.
+  rpc AckMessage(AckMessageRequest) returns (AckMessageResponse);
+  
+  // GetConnectionStats returns connection statistics for monitoring.
+  rpc GetConnectionStats(GetConnectionStatsRequest) returns (GetConnectionStatsResponse);
+  
+  // BroadcastSystemMessage sends a system-wide message to all connected users.
+  //
+  // Used for maintenance notifications, etc.
+  rpc BroadcastSystemMessage(BroadcastSystemMessageRequest) returns (BroadcastSystemMessageResponse);
+}
+
+// TriggerSyncRequest specifies a sync event to broadcast.
+message TriggerSyncRequest {
+  // User ID to notify
+  string user_id = 1;
+  
+  // Event type (e.g., "favorite.added", "playlist.updated")
+  string event_type = 2;
+  
+  // Event payload (flexible JSON structure)
+  google.protobuf.Struct data = 3;
+  
+  // Optional: exclude a specific device from receiving this event
+  // (useful when the originating device doesn't need to be notified)
+  string exclude_device_id = 4;
+  
+  // Whether to queue this message if the user is offline
+  bool queue_if_offline = 5;
+}
+
+// TriggerSyncResponse confirms the event was sent.
+message TriggerSyncResponse {
+  // Whether the event was successfully broadcast
+  bool success = 1;
+  
+  // Number of devices that received the event
+  int32 devices_notified = 2;
+  
+  // Whether the message was queued for offline delivery
+  bool queued = 3;
+}
+
+// GetOfflineMessagesRequest fetches queued messages.
+message GetOfflineMessagesRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Optional: only fetch messages after this ID (for pagination)
+  string after_message_id = 2;
+  
+  // Maximum number of messages to return (default: 100, max: 1000)
+  int32 limit = 3;
+}
+
+// GetOfflineMessagesResponse contains queued messages.
+message GetOfflineMessagesResponse {
+  // List of offline messages (oldest first)
+  repeated SyncMessage messages = 1;
+  
+  // Whether there are more messages (for pagination)
+  bool has_more = 2;
+}
+
+// AckMessageRequest acknowledges message receipt.
+message AckMessageRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Message ID to acknowledge
+  string message_id = 2;
+  
+  // ACK token from the message (for verification)
+  string ack_token = 3;
+}
+
+// AckMessageResponse confirms the acknowledgment.
+message AckMessageResponse {
+  // Whether the acknowledgment was successful
+  bool success = 1;
+}
+
+// GetConnectionStatsRequest fetches connection statistics.
+message GetConnectionStatsRequest {
+  // Optional: filter by user ID
+  string user_id = 1;
+}
+
+// GetConnectionStatsResponse contains connection statistics.
+message GetConnectionStatsResponse {
+  // Total active WebSocket connections
+  int32 total_connections = 1;
+  
+  // Unique connected users
+  int32 unique_users = 2;
+  
+  // Breakdown by platform
+  repeated PlatformStats platform_stats = 3;
+  
+  // If user_id was provided, return specific user's connections
+  repeated UserConnection user_connections = 4;
+}
+
+// BroadcastSystemMessageRequest sends a system-wide message.
+message BroadcastSystemMessageRequest {
+  // Message type (e.g., "maintenance", "announcement")
+  string message_type = 1;
+  
+  // Message payload
+  google.protobuf.Struct data = 2;
+  
+  // Optional: only send to specific user roles
+  repeated string target_roles = 3;
+}
+
+// BroadcastSystemMessageResponse confirms the broadcast.
+message BroadcastSystemMessageResponse {
+  // Whether the broadcast was successful
+  bool success = 1;
+  
+  // Number of users notified
+  int32 users_notified = 2;
+}
+
+// SyncMessage represents a synchronization event.
+message SyncMessage {
+  // Unique message ID
+  string id = 1;
+  
+  // Event type (e.g., "favorite.added", "playlist.updated")
+  string event_type = 2;
+  
+  // User ID this message belongs to
+  string user_id = 3;
+  
+  // Event payload
+  google.protobuf.Struct data = 4;
+  
+  // ACK token (client must send this back to acknowledge)
+  string ack_token = 5;
+  
+  // Message creation timestamp
+  google.protobuf.Timestamp created_at = 6;
+  
+  // Whether this message requires acknowledgment
+  bool requires_ack = 7;
+}
+
+// PlatformStats contains connection statistics per platform.
+message PlatformStats {
+  // Platform name (iOS, Android, Web, Desktop, TV)
+  string platform = 1;
+  
+  // Number of connections
+  int32 connection_count = 2;
+}
+
+// UserConnection represents a user's WebSocket connection.
+message UserConnection {
+  // Connection ID
+  string conn_id = 1;
+  
+  // User ID
+  string user_id = 2;
+  
+  // Device ID
+  string device_id = 3;
+  
+  // Platform
+  string platform = 4;
+  
+  // Client IP address
+  string ip_address = 5;
+  
+  // Connection established time
+  google.protobuf.Timestamp connected_at = 6;
+  
+  // Last ping time
+  google.protobuf.Timestamp last_ping = 7;
+}

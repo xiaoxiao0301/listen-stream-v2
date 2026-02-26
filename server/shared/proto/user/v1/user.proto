@@ -1,0 +1,428 @@
+syntax = "proto3";
+
+package user.v1;
+
+option go_package = "github.com/listen-stream/server/shared/proto/user/v1;userv1";
+
+import "google/protobuf/timestamp.proto";
+
+// UserService manages user-generated content including favorites, playlists, and play history.
+//
+// All RPCs require valid authentication and are called by proxy-svc.
+service UserService {
+  // AddFavorite adds a song/album/artist/mv to user's favorites.
+  rpc AddFavorite(AddFavoriteRequest) returns (AddFavoriteResponse);
+  
+  // RemoveFavorite removes an item from favorites (soft delete).
+  rpc RemoveFavorite(RemoveFavoriteRequest) returns (RemoveFavoriteResponse);
+  
+  // ListFavorites returns paginated favorites for a user.
+  rpc ListFavorites(ListFavoritesRequest) returns (ListFavoritesResponse);
+  
+  // AddPlayHistory records a song play event.
+  //
+  // Automatically enforces 500-item limit per user with FIFO eviction.
+  rpc AddPlayHistory(AddPlayHistoryRequest) returns (AddPlayHistoryResponse);
+  
+  // ListPlayHistory returns paginated play history.
+  rpc ListPlayHistory(ListPlayHistoryRequest) returns (ListPlayHistoryResponse);
+  
+  // CreatePlaylist creates a new user playlist.
+  rpc CreatePlaylist(CreatePlaylistRequest) returns (CreatePlaylistResponse);
+  
+  // UpdatePlaylist modifies playlist metadata (name, cover, visibility).
+  rpc UpdatePlaylist(UpdatePlaylistRequest) returns (UpdatePlaylistResponse);
+  
+  // DeletePlaylist soft-deletes a playlist.
+  rpc DeletePlaylist(DeletePlaylistRequest) returns (DeletePlaylistResponse);
+  
+  // ListPlaylists returns all playlists for a user.
+  rpc ListPlaylists(ListPlaylistsRequest) returns (ListPlaylistsResponse);
+  
+  // AddSongToPlaylist adds a song to a playlist.
+  rpc AddSongToPlaylist(AddSongToPlaylistRequest) returns (AddSongToPlaylistResponse);
+  
+  // RemoveSongFromPlaylist removes a song from a playlist.
+  rpc RemoveSongFromPlaylist(RemoveSongFromPlaylistRequest) returns (RemoveSongFromPlaylistResponse);
+  
+  // GetPlaylistSongs returns all songs in a playlist.
+  rpc GetPlaylistSongs(GetPlaylistSongsRequest) returns (GetPlaylistSongsResponse);
+}
+
+// AddFavoriteRequest specifies the item to favorite.
+message AddFavoriteRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Type of content to favorite
+  FavoriteType type = 2;
+  
+  // Target content ID (third-party platform ID)
+  string target_id = 3;
+  
+  // Optional metadata for display (redundant storage for offline)
+  FavoriteMetadata metadata = 4;
+}
+
+// AddFavoriteResponse confirms the favorite was added.
+message AddFavoriteResponse {
+  // The created favorite ID
+  string favorite_id = 1;
+  
+  // Creation timestamp
+  google.protobuf.Timestamp created_at = 2;
+}
+
+// RemoveFavoriteRequest specifies which favorite to remove.
+message RemoveFavoriteRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Favorite ID to remove
+  string favorite_id = 2;
+}
+
+// RemoveFavoriteResponse confirms the removal.
+message RemoveFavoriteResponse {
+  // Whether the removal was successful
+  bool success = 1;
+}
+
+// ListFavoritesRequest specifies pagination and filtering.
+message ListFavoritesRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Optional type filter
+  FavoriteType type = 2;
+  
+  // Pagination: page number (1-based)
+  int32 page = 3;
+  
+  // Pagination: items per page (default: 20, max: 100)
+  int32 page_size = 4;
+}
+
+// ListFavoritesResponse contains paginated favorites.
+message ListFavoritesResponse {
+  // List of favorites
+  repeated Favorite favorites = 1;
+  
+  // Total count (for pagination UI)
+  int32 total = 2;
+  
+  // Current page
+  int32 page = 3;
+  
+  // Page size
+  int32 page_size = 4;
+}
+
+// AddPlayHistoryRequest records a play event.
+message AddPlayHistoryRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Song ID (third-party platform ID)
+  string song_id = 2;
+  
+  // Song name (redundant storage for offline display)
+  string song_name = 3;
+  
+  // Artist name (redundant storage)
+  string artist_name = 4;
+  
+  // Album name (redundant storage)
+  string album_name = 5;
+  
+  // Play duration in seconds
+  int32 duration = 6;
+}
+
+// AddPlayHistoryResponse confirms the history was recorded.
+message AddPlayHistoryResponse {
+  // The created history ID
+  string history_id = 1;
+  
+  // Play timestamp
+  google.protobuf.Timestamp played_at = 2;
+  
+  // Whether old history was evicted (due to 500-item limit)
+  bool evicted_old_history = 3;
+}
+
+// ListPlayHistoryRequest specifies pagination.
+message ListPlayHistoryRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Pagination: page number (1-based)
+  int32 page = 2;
+  
+  // Pagination: items per page (default: 20, max: 100)
+  int32 page_size = 3;
+}
+
+// ListPlayHistoryResponse contains paginated history.
+message ListPlayHistoryResponse {
+  // List of play history (newest first)
+  repeated PlayHistory history = 1;
+  
+  // Total count (max 500)
+  int32 total = 2;
+  
+  // Current page
+  int32 page = 3;
+  
+  // Page size
+  int32 page_size = 4;
+}
+
+// CreatePlaylistRequest contains playlist details.
+message CreatePlaylistRequest {
+  // User ID
+  string user_id = 1;
+  
+  // Playlist name
+  string name = 2;
+  
+  // Optional cover image URL
+  string cover_url = 3;
+  
+  // Whether the playlist is public
+  bool is_public = 4;
+}
+
+// CreatePlaylistResponse contains the created playlist.
+message CreatePlaylistResponse {
+  // The created playlist
+  Playlist playlist = 1;
+}
+
+// UpdatePlaylistRequest modifies playlist metadata.
+message UpdatePlaylistRequest {
+  // User ID (for authorization)
+  string user_id = 1;
+  
+  // Playlist ID to update
+  string playlist_id = 2;
+  
+  // New name (optional, empty = no change)
+  string name = 3;
+  
+  // New cover URL (optional, empty = no change)
+  string cover_url = 4;
+  
+  // New visibility (optional)
+  optional bool is_public = 5;
+}
+
+// UpdatePlaylistResponse contains the updated playlist.
+message UpdatePlaylistResponse {
+  // The updated playlist
+  Playlist playlist = 1;
+}
+
+// DeletePlaylistRequest specifies which playlist to delete.
+message DeletePlaylistRequest {
+  // User ID (for authorization)
+  string user_id = 1;
+  
+  // Playlist ID to delete
+  string playlist_id = 2;
+}
+
+// DeletePlaylistResponse confirms the deletion.
+message DeletePlaylistResponse {
+  // Whether the deletion was successful
+  bool success = 1;
+}
+
+// ListPlaylistsRequest fetches all playlists for a user.
+message ListPlaylistsRequest {
+  // User ID
+  string user_id = 1;
+}
+
+// ListPlaylistsResponse contains all playlists.
+message ListPlaylistsResponse {
+  // List of playlists
+  repeated Playlist playlists = 1;
+}
+
+// AddSongToPlaylistRequest adds a song.
+message AddSongToPlaylistRequest {
+  // User ID (for authorization)
+  string user_id = 1;
+  
+  // Playlist ID
+  string playlist_id = 2;
+  
+  // Song ID to add
+  string song_id = 3;
+  
+  // Optional position (0 = end, 1+ = specific position)
+  int32 position = 4;
+}
+
+// AddSongToPlaylistResponse confirms the addition.
+message AddSongToPlaylistResponse {
+  // Whether the addition was successful
+  bool success = 1;
+  
+  // New song count in playlist
+  int32 song_count = 2;
+}
+
+// RemoveSongFromPlaylistRequest removes a song.
+message RemoveSongFromPlaylistRequest {
+  // User ID (for authorization)
+  string user_id = 1;
+  
+  // Playlist ID
+  string playlist_id = 2;
+  
+  // Song ID to remove
+  string song_id = 3;
+}
+
+// RemoveSongFromPlaylistResponse confirms the removal.
+message RemoveSongFromPlaylistResponse {
+  // Whether the removal was successful
+  bool success = 1;
+  
+  // New song count in playlist
+  int32 song_count = 2;
+}
+
+// GetPlaylistSongsRequest fetches songs in a playlist.
+message GetPlaylistSongsRequest {
+  // Playlist ID
+  string playlist_id = 1;
+}
+
+// GetPlaylistSongsResponse contains playlist songs.
+message GetPlaylistSongsResponse {
+  // List of songs (ordered by position)
+  repeated PlaylistSong songs = 1;
+}
+
+// Favorite represents a favorited item.
+message Favorite {
+  // Unique favorite ID
+  string id = 1;
+  
+  // User ID
+  string user_id = 2;
+  
+  // Type of content
+  FavoriteType type = 3;
+  
+  // Target content ID
+  string target_id = 4;
+  
+  // Optional metadata
+  FavoriteMetadata metadata = 5;
+  
+  // Creation timestamp
+  google.protobuf.Timestamp created_at = 6;
+}
+
+// FavoriteMetadata contains display information.
+message FavoriteMetadata {
+  // Song/Album/Artist/MV name
+  string name = 1;
+  
+  // Artist name (for songs/albums)
+  string artist = 2;
+  
+  // Cover image URL
+  string cover_url = 3;
+}
+
+// PlayHistory represents a play event.
+message PlayHistory {
+  // Unique history ID
+  string id = 1;
+  
+  // User ID
+  string user_id = 2;
+  
+  // Song ID
+  string song_id = 3;
+  
+  // Song name (redundant storage)
+  string song_name = 4;
+  
+  // Artist name (redundant storage)
+  string artist_name = 5;
+  
+  // Album name (redundant storage)
+  string album_name = 6;
+  
+  // Play duration in seconds
+  int32 duration = 7;
+  
+  // Play timestamp
+  google.protobuf.Timestamp played_at = 8;
+}
+
+// Playlist represents a user-created playlist.
+message Playlist {
+  // Unique playlist ID
+  string id = 1;
+  
+  // User ID
+  string user_id = 2;
+  
+  // Playlist name
+  string name = 3;
+  
+  // Cover image URL
+  string cover_url = 4;
+  
+  // Whether the playlist is public
+  bool is_public = 5;
+  
+  // Song count (redundant for fast display)
+  int32 song_count = 6;
+  
+  // Creation timestamp
+  google.protobuf.Timestamp created_at = 7;
+  
+  // Last update timestamp
+  google.protobuf.Timestamp updated_at = 8;
+}
+
+// PlaylistSong represents a song in a playlist.
+message PlaylistSong {
+  // Playlist ID
+  string playlist_id = 1;
+  
+  // Song ID
+  string song_id = 2;
+  
+  // Position in playlist (1-based)
+  int32 position = 3;
+  
+  // When the song was added
+  google.protobuf.Timestamp added_at = 4;
+}
+
+// FavoriteType defines what can be favorited.
+enum FavoriteType {
+  // Default type (should not be used)
+  FAVORITE_TYPE_UNSPECIFIED = 0;
+  
+  // Song
+  FAVORITE_TYPE_SONG = 1;
+  
+  // Album
+  FAVORITE_TYPE_ALBUM = 2;
+  
+  // Artist
+  FAVORITE_TYPE_ARTIST = 3;
+  
+  // Music video
+  FAVORITE_TYPE_MV = 4;
+}
