@@ -1041,9 +1041,6 @@ listen-stream/
 **文件**: `server/services/proxy-svc/internal/upstream/`
 - `client.go`: HTTP客户端基类
 - `qq_music.go`: QQ Music API
-- `joox.go`: Joox API
-- `netease.go`: 网易云API（新增）
-- `kugou.go`: 酷狗API（新增）
 - `breaker.go`: 熔断器集成（新增）
 - `retry.go`: 指数退避重试（新增）
 - `rate_limiter.go`: 上游速率限制（新增）
@@ -1057,7 +1054,7 @@ listen-stream/
 **文件**: `server/services/proxy-svc/internal/handler/`
 - `song_handler.go`: 播放URL获取
   - 智能匹配（歌名+歌手名）
-  - 4源Fallback: QQ → Joox → NetEase → Kugou
+  - 4源Fallback: QQ → Joox → NetEase → Kugou -> bilibili
   - 每源重试3次
 - `fallback_chain.go`: gRPC客户端 + 中间件栈
 **gRPC客户端集成**:
