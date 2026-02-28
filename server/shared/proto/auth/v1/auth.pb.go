@@ -1199,7 +1199,7 @@ const file_auth_v1_auth_proto_rawDesc = "" +
 	"\vRevokeToken\x12\x1b.auth.v1.RevokeTokenRequest\x1a\x1c.auth.v1.RevokeTokenResponse\x12K\n" +
 	"\fRevokeDevice\x12\x1c.auth.v1.RevokeDeviceRequest\x1a\x1d.auth.v1.RevokeDeviceResponse\x12Q\n" +
 	"\x0eGetUserDevices\x12\x1e.auth.v1.GetUserDevicesRequest\x1a\x1f.auth.v1.GetUserDevicesResponse\x12c\n" +
-	"\x14ValidateTokenVersion\x12$.auth.v1.ValidateTokenVersionRequest\x1a%.auth.v1.ValidateTokenVersionResponseB=Z;github.com/listen-stream/server/shared/proto/auth/v1;authv1b\x06proto3"
+	"\x14ValidateTokenVersion\x12$.auth.v1.ValidateTokenVersionRequest\x1a%.auth.v1.ValidateTokenVersionResponseB=Z;github.com/xiaoxiao0301/listen-stream-v2/server/shared/proto/auth/v1;authv1b\x06proto3"
 
 var (
 	file_auth_v1_auth_proto_rawDescOnce sync.Once

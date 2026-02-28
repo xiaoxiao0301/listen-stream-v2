@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/listen-stream/server/shared/pkg/logger"
+	"github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/logger"
 )
 
 // Logging middleware logs HTTP requests with structured information

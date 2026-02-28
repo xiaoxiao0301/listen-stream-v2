@@ -2140,7 +2140,7 @@ const file_user_v1_user_proto_rawDesc = "" +
 	"\rListPlaylists\x12\x1d.user.v1.ListPlaylistsRequest\x1a\x1e.user.v1.ListPlaylistsResponse\x12Z\n" +
 	"\x11AddSongToPlaylist\x12!.user.v1.AddSongToPlaylistRequest\x1a\".user.v1.AddSongToPlaylistResponse\x12i\n" +
 	"\x16RemoveSongFromPlaylist\x12&.user.v1.RemoveSongFromPlaylistRequest\x1a'.user.v1.RemoveSongFromPlaylistResponse\x12W\n" +
-	"\x10GetPlaylistSongs\x12 .user.v1.GetPlaylistSongsRequest\x1a!.user.v1.GetPlaylistSongsResponseB=Z;github.com/listen-stream/server/shared/proto/user/v1;userv1b\x06proto3"
+	"\x10GetPlaylistSongs\x12 .user.v1.GetPlaylistSongsRequest\x1a!.user.v1.GetPlaylistSongsResponseB=Z;github.com/xiaoxiao0301/listen-stream-v2/server/shared/proto/user/v1;userv1b\x06proto3"
 
 var (
 	file_user_v1_user_proto_rawDescOnce sync.Once

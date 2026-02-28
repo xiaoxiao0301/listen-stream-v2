@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	sharedJWT "github.com/listen-stream/server/shared/pkg/jwt"
+	sharedJWT "github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/jwt"
 	"github.com/xiaoxiao0301/listen-stream-v2/server/services/auth-svc/internal/domain"
 	"github.com/xiaoxiao0301/listen-stream-v2/server/services/auth-svc/internal/repository"
 )

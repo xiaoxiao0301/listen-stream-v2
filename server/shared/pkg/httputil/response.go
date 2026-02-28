@@ -4,7 +4,7 @@ package httputil
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/listen-stream/server/shared/pkg/errors"
+	"github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/errors"
 )
 
 // Response represents a standard API response.

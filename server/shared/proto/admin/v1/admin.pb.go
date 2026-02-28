@@ -1645,7 +1645,7 @@ const file_admin_v1_admin_proto_rawDesc = "" +
 	"\n" +
 	"EnableUser\x12\x1b.admin.v1.EnableUserRequest\x1a\x1c.admin.v1.EnableUserResponse\x12\\\n" +
 	"\x11ListOperationLogs\x12\".admin.v1.ListOperationLogsRequest\x1a#.admin.v1.ListOperationLogsResponse\x12b\n" +
-	"\x13ExportOperationLogs\x12$.admin.v1.ExportOperationLogsRequest\x1a%.admin.v1.ExportOperationLogsResponseB?Z=github.com/listen-stream/server/shared/proto/admin/v1;adminv1b\x06proto3"
+	"\x13ExportOperationLogs\x12$.admin.v1.ExportOperationLogsRequest\x1a%.admin.v1.ExportOperationLogsResponseB?Z=github.com/xiaoxiao0301/listen-stream-v2/server/shared/proto/admin/v1;adminv1b\x06proto3"
 
 var (
 	file_admin_v1_admin_proto_rawDescOnce sync.Once

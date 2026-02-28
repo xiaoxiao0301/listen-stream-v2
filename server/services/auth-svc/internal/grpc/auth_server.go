@@ -7,7 +7,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	authv1 "github.com/listen-stream/server/shared/proto/auth/v1"
+	authv1 "github.com/xiaoxiao0301/listen-stream-v2/server/shared/proto/auth/v1"
 	"github.com/xiaoxiao0301/listen-stream-v2/server/services/auth-svc/internal/domain"
 	deviceservice "github.com/xiaoxiao0301/listen-stream-v2/server/services/auth-svc/internal/service/device"
 	jwtservice "github.com/xiaoxiao0301/listen-stream-v2/server/services/auth-svc/internal/service/jwt"

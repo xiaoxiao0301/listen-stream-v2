@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/listen-stream/server/shared/pkg/redis"
+	"github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/redis"
 )
 
 // RateLimiter provides rate limiting using Redis.

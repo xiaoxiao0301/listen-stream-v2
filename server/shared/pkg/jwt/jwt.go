@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/listen-stream/server/shared/pkg/errors"
+	"github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/errors"
 )
 
 // Claims represents JWT claims.

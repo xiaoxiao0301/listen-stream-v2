@@ -24,7 +24,7 @@ func NewQQMusicClient(config UpstreamConfig, log logger.Logger) *QQMusicClient {
 		Timeout:         config.Timeout,
 		MaxRetries:      config.MaxRetries,
 		RateLimit:       config.RateLimit,
-		BreakerSettings: config.BreakerSettings,
+		BreakerSettings: DefaultBreakerSettings(),
 	}
 
 	return &QQMusicClient{
@@ -929,4 +929,39 @@ func (c *QQMusicClient) GetLyric(ctx context.Context, songMid string) (*Lyric, e
 	}
 
 	return &response.Data, nil
+}
+
+// HealthCheck 健康检查
+func (c *QQMusicClient) HealthCheck(ctx context.Context) error {
+	// 使用轻量级接口进行健康检查
+	_, err := c.Get(ctx, "/health", nil)
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+	return nil
+}
+
+// SearchSong 搜索歌曲（单曲搜索，用于 ClientInterface）
+func (c *QQMusicClient) SearchSong(ctx context.Context, songName, artistName string) (*SearchResult, error) {
+	// 使用 SearchSongs 并返回第一页结果
+	response, err := c.SearchSongs(ctx, songName+" "+artistName, 1, 10)
+	if err != nil {
+		return nil, err
+	}
+
+	// 转换为 SearchResult
+	result := &SearchResult{
+		Total: response.Total,	}
+
+	// 注意：PageResponse.Data 是 interface{} 类型
+	// 需要转换为 []Song
+	if data, ok := response.Data.([]interface{}); ok {
+		for _, item := range data {
+			if song, ok := item.(Song); ok {
+				result.Songs = append(result.Songs, song)
+			}
+		}
+	}
+
+	return result, nil
 }

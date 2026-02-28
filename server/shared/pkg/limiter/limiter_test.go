@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/listen-stream/server/shared/pkg/redis"
+	"github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

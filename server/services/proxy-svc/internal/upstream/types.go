@@ -1,6 +1,9 @@
 package upstream
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // ===== 通用响应结构 =====
 
@@ -34,20 +37,28 @@ type Playlist struct {
 	Creator     string `json:"creator"`
 }
 
-// Song 歌曲
+// Song 歌曲 (标准化结构，兼容多个上游源)
 type Song struct {
-	SongID     string   `json:"song_id"`
-	SongMid    string   `json:"song_mid"`
-	SongName   string   `json:"song_name"`
-	AlbumID    string   `json:"album_id"`
-	AlbumMid   string   `json:"album_mid"`
-	AlbumName  string   `json:"album_name"`
-	SingerID   string   `json:"singer_id"`
-	SingerMid  string   `json:"singer_mid"`
-	SingerName string   `json:"singer_name"`
-	Singers    []Singer `json:"singers"`
-	Duration   int      `json:"duration"`
-	PicURL     string   `json:"pic_url"`
+	// QQ Music style
+	SongID     string   `json:"song_id,omitempty"`
+	SongMid    string   `json:"song_mid,omitempty"`
+	SongName   string   `json:"song_name,omitempty"`
+	AlbumID    string   `json:"album_id,omitempty"`
+	AlbumMid   string   `json:"album_mid,omitempty"`
+	AlbumName  string   `json:"album_name,omitempty"`
+	SingerID   string   `json:"singer_id,omitempty"`
+	SingerMid  string   `json:"singer_mid,omitempty"`
+	SingerName string   `json:"singer_name,omitempty"`
+	Singers    []Singer `json:"singers,omitempty"`
+	Duration   int      `json:"duration,omitempty"`
+	PicURL     string   `json:"pic_url,omitempty"`
+	
+	// Generic standardized fields (for fallback sources)
+	ID       string `json:"id,omitempty"`       // Universal song ID
+	Name     string `json:"name,omitempty"`     // Universal song name
+	Artist   string `json:"artist,omitempty"`   // Universal artist name
+	Album    string `json:"album,omitempty"`    // Universal album name
+	CoverURL string `json:"cover_url,omitempty"` // Universal cover URL
 }
 
 // Album 专辑
@@ -253,12 +264,75 @@ type FallbackSongURL struct {
 
 // UpstreamConfig 上游配置
 type UpstreamConfig struct {
-	Name            string
-	BaseURL         string
-	Timeout         time.Duration
-	MaxRetries      int
-	RateLimit       int
-	Cookie          string
-	FallbackURL     string // Fallback API URL
-	BreakerSettings BreakerSettings
+	Name        string
+	BaseURL     string
+	Timeout     time.Duration
+	MaxRetries  int
+	RateLimit   int
+	Cookie      string
+	FallbackURL string // Fallback API URL
+}
+
+// SongURLResponse 标准化的歌曲URL响应
+type SongURLResponse struct {
+	URL     string `json:"url"`
+	Quality string `json:"quality"`
+	Size    int64  `json:"size"`
+	Format  string `json:"format"`
+}
+
+// ClientInterface 上游客户端接口
+type ClientInterface interface {
+	// 播放和搜索（用于 FallbackManager）
+	GetSongURL(ctx context.Context, songMid, songName string) (*SongURL, error)
+	SearchSong(ctx context.Context, songName, artistName string) (*SearchResult, error)
+	GetBanners(ctx context.Context) ([]Banner, error)
+	HealthCheck(ctx context.Context) error
+
+	// Home模块
+	GetDailyRecommendPlaylists(ctx context.Context) ([]Playlist, error)
+	GetRecommendPlaylists(ctx context.Context) ([]Playlist, error)
+	GetNewSongs(ctx context.Context, typ int) ([]Song, error)
+	GetNewAlbums(ctx context.Context, typ int) ([]Album, error)
+
+	// Playlist模块
+	GetPlaylistCategories(ctx context.Context) ([]PlaylistCategory, error)
+	GetPlaylistsByCategory(ctx context.Context, req GetPlaylistsByCategoryRequest) (*PageResponse, error)
+	GetPlaylistDetail(ctx context.Context, dissID string) (*PlaylistDetail, error)
+
+	// Song模块
+	GetSongDetail(ctx context.Context, songMid string) (*SongDetail, error)
+	GetLyric(ctx context.Context, songMid string) (*Lyric, error)
+
+	// Album模块
+	GetAlbumDetail(ctx context.Context, albumMid string) (*Album, error)
+	GetAlbumSongs(ctx context.Context, albumMid string) ([]Song, error)
+
+	// Search模块
+	GetHotKeys(ctx context.Context) ([]HotKey, error)
+	SearchSongs(ctx context.Context, keyword string, page, size int) (*PageResponse, error)
+	SearchSingers(ctx context.Context, keyword string, page, size int) (*PageResponse, error)
+	SearchAlbums(ctx context.Context, keyword string, page, size int) (*PageResponse, error)
+	SearchMVs(ctx context.Context, keyword string, page, size int) (*PageResponse, error)
+
+	// Singer模块
+	GetSingerCategories(ctx context.Context) ([]CategoryFilter, error)
+	GetSingerList(ctx context.Context, req GetSingerListRequest) (*PageResponse, error)
+	GetSingerDetail(ctx context.Context, singerMid string, page int) (*PageResponse, error)
+	GetSingerAlbums(ctx context.Context, singerMid string, page, size int) (*PageResponse, error)
+	GetSingerMVs(ctx context.Context, singerMid string, page, size int) (*PageResponse, error)
+	GetSingerSongs(ctx context.Context, singerMid string, page, size int) (*PageResponse, error)
+
+	// Ranking模块
+	GetRankingList(ctx context.Context) ([]RankingCategory, error)
+	GetRankingDetail(ctx context.Context, topID, page, size int, period string) (*PageResponse, error)
+
+	// Radio模块
+	GetRadioCategories(ctx context.Context) ([]Radio, error)
+	GetRadioSongs(ctx context.Context, radioID int) ([]Song, error)
+
+	// MV模块
+	GetMVCategories(ctx context.Context) (*MVCategory, error)
+	GetMVList(ctx context.Context, area, version, page, size int) (*PageResponse, error)
+	GetMVDetail(ctx context.Context, vid string) (*MVDetail, error)
 }

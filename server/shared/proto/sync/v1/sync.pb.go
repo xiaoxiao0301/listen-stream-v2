@@ -964,7 +964,7 @@ const file_sync_v1_sync_proto_rawDesc = "" +
 	"\n" +
 	"AckMessage\x12\x1a.sync.v1.AckMessageRequest\x1a\x1b.sync.v1.AckMessageResponse\x12]\n" +
 	"\x12GetConnectionStats\x12\".sync.v1.GetConnectionStatsRequest\x1a#.sync.v1.GetConnectionStatsResponse\x12i\n" +
-	"\x16BroadcastSystemMessage\x12&.sync.v1.BroadcastSystemMessageRequest\x1a'.sync.v1.BroadcastSystemMessageResponseB=Z;github.com/listen-stream/server/shared/proto/sync/v1;syncv1b\x06proto3"
+	"\x16BroadcastSystemMessage\x12&.sync.v1.BroadcastSystemMessageRequest\x1a'.sync.v1.BroadcastSystemMessageResponseB=Z;github.com/xiaoxiao0301/listen-stream-v2/server/shared/proto/sync/v1;syncv1b\x06proto3"
 
 var (
 	file_sync_v1_sync_proto_rawDescOnce sync.Once

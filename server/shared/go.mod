@@ -1,4 +1,4 @@
-module github.com/listen-stream/server/shared
+module github.com/xiaoxiao0301/listen-stream-v2/server/shared
 
 go 1.25.5
 
