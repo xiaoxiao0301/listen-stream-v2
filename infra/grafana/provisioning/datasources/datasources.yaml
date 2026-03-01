@@ -1,0 +1,46 @@
+apiVersion: 1
+
+datasources:
+  # ── Prometheus ────────────────────────────────────────────────────────────
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: "http://prometheus:9090"
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: "15s"
+      queryTimeout: "60s"
+      httpMethod: "POST"
+
+  # ── Jaeger ────────────────────────────────────────────────────────────────
+  - name: Jaeger
+    type: jaeger
+    uid: jaeger
+    access: proxy
+    url: "http://jaeger:16686"
+    editable: false
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: elasticsearch
+        filterByTraceID: true
+        filterBySpanID: false
+      nodeGraph:
+        enabled: true
+
+  # ── Elasticsearch ─────────────────────────────────────────────────────────
+  - name: Elasticsearch
+    type: elasticsearch
+    uid: elasticsearch
+    access: proxy
+    url: "http://elasticsearch:9200"
+    editable: false
+    jsonData:
+      index: "listen-stream-logs-*"
+      timeField: "@timestamp"
+      logMessageField: "message"
+      logLevelField: "level"
+      esVersion: "8.0.0"
+      maxConcurrentShardRequests: 5
+      logLevelField: "log.level"

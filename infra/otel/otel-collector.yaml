@@ -1,0 +1,167 @@
+# OpenTelemetry Collector Configuration for Listen Stream
+# Receives traces/metrics/logs from all services and exports to backends
+
+# ─── RECEIVERS ────────────────────────────────────────────────────────────────
+receivers:
+  # OTLP receiver - services push telemetry here
+  otlp:
+    protocols:
+      grpc:
+        endpoint: "0.0.0.0:4317"   # gRPC OTLP ingestion
+      http:
+        endpoint: "0.0.0.0:4318"   # HTTP OTLP ingestion
+        cors:
+          allowed_origins:
+            - "http://*"
+            - "https://*"
+
+  # Prometheus receiver - pull metrics from services /metrics endpoints
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "otel-collector"
+          static_configs:
+            - targets: ["0.0.0.0:8888"]  # Collector self-metrics
+
+  # Host metrics receiver - system metrics
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      disk: {}
+      network: {}
+      load: {}
+
+# ─── PROCESSORS ───────────────────────────────────────────────────────────────
+processors:
+  # Batch processor for efficient export
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # Memory limiter - prevent OOM
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Resource detector - add host/container info
+  resourcedetection:
+    detectors: [env, docker, system]
+    timeout: 10s
+    override: false
+
+  # Attributes processor - enrich spans with service info
+  attributes:
+    actions:
+      - key: deployment.environment
+        value: "${DEPLOYMENT_ENV:-development}"
+        action: insert
+      - key: service.namespace
+        value: "listen-stream"
+        action: insert
+
+  # Transform processor - normalize metric names
+  transform/metrics:
+    metric_statements:
+      - context: metric
+        statements:
+          - set(description, "HTTP request duration") where name == "http_request_duration_seconds"
+
+  # Filter processor - drop low-value health check spans
+  filter:
+    traces:
+      span:
+        - 'attributes["http.target"] == "/health"'
+        - 'attributes["http.target"] == "/metrics"'
+        - 'attributes["http.target"] == "/ready"'
+
+# ─── EXPORTERS ────────────────────────────────────────────────────────────────
+exporters:
+  # Jaeger - distributed tracing storage
+  otlp/jaeger:
+    endpoint: "jaeger:4317"
+    tls:
+      insecure: true
+
+  # Prometheus - metrics storage
+  prometheus:
+    endpoint: "0.0.0.0:8889"  # Prometheus scrapes this
+    namespace: "listen_stream"
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Elasticsearch - logs storage
+  elasticsearch:
+    endpoints:
+      - "http://elasticsearch:9200"
+    index: "listen-stream-traces"
+    pipeline: "listen-stream-pipeline"
+    retry:
+      enabled: true
+      max_requests: 3
+      initial_interval: 1s
+      max_interval: 10s
+
+  # Logging exporter - debug output
+  debug:
+    verbosity: "basic"
+    sampling_initial: 5
+    sampling_thereafter: 100
+
+# ─── EXTENSIONS ───────────────────────────────────────────────────────────────
+extensions:
+  # Health check
+  health_check:
+    endpoint: "0.0.0.0:13133"
+
+  # pprof for profiling
+  pprof:
+    endpoint: "0.0.0.0:1777"
+
+  # Memory ballast
+  memory_ballast:
+    size_mib: 64
+
+  # zPages - debug pages
+  zpages:
+    endpoint: "0.0.0.0:55679"
+
+# ─── SERVICE PIPELINES ────────────────────────────────────────────────────────
+service:
+  extensions: [health_check, pprof, memory_ballast, zpages]
+
+  pipelines:
+    # Traces pipeline
+    traces:
+      receivers:  [otlp]
+      processors: [memory_limiter, resourcedetection, attributes, filter, batch]
+      exporters:  [otlp/jaeger, debug]
+
+    # Metrics pipeline
+    metrics:
+      receivers:  [otlp, prometheus, hostmetrics]
+      processors: [memory_limiter, resourcedetection, transform/metrics, batch]
+      exporters:  [prometheus]
+
+    # Logs pipeline
+    logs:
+      receivers:  [otlp]
+      processors: [memory_limiter, resourcedetection, attributes, batch]
+      exporters:  [elasticsearch, debug]
+
+  # Telemetry for the collector itself
+  telemetry:
+    logs:
+      level: "info"
+    metrics:
+      level: "detailed"
+      address: "0.0.0.0:8888"

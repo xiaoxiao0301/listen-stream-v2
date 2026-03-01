@@ -28,16 +28,20 @@ func (e *Error) Unwrap() error {
 	return e.Err
 }
 
-// WithDetails adds details to the error.
+// WithDetails returns a copy of the error with the given details.
+// It does NOT mutate the receiver, so package-level sentinel errors are safe.
 func (e *Error) WithDetails(details interface{}) *Error {
-	e.Details = details
-	return e
+	copy := *e
+	copy.Details = details
+	return &copy
 }
 
-// WithError wraps another error.
+// WithError returns a copy of the error with the given wrapped error.
+// It does NOT mutate the receiver, so package-level sentinel errors are safe.
 func (e *Error) WithError(err error) *Error {
-	e.Err = err
-	return e
+	copy := *e
+	copy.Err = err
+	return &copy
 }
 
 // New creates a new Error.

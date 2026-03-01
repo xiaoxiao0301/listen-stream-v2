@@ -29,7 +29,8 @@ func NewFallbackManager(clients []ClientInterface, names []string, log logger.Lo
 	}
 }
 
-// GetSongURL 获取歌曲播放URL（实现 ClientInterface）
+// GetSongURL 获取歌曲播放URL，依次尝试所有上游源直到成功
+// 流程：clients[0] (QQ Music) → clients[1] (Joox) → clients[2] (NetEase) → clients[3] (Kugou)
 func (fm *FallbackManager) GetSongURL(ctx context.Context, songMid, songName string) (*SongURL, error) {
 	fm.mu.RLock()
 	defer fm.mu.RUnlock()
@@ -38,8 +39,33 @@ func (fm *FallbackManager) GetSongURL(ctx context.Context, songMid, songName str
 		return nil, fmt.Errorf("no clients available")
 	}
 
-	// 尝试从第一个客户端获取（通常是 QQ Music）
-	return fm.clients[0].GetSongURL(ctx, songMid, songName)
+	var lastErr error
+	for i, client := range fm.clients {
+		sourceName := fm.names[i]
+		fm.logger.Debug("Trying GetSongURL from source",
+			logger.String("source", sourceName),
+			logger.String("song_mid", songMid),
+		)
+		result, err := client.GetSongURL(ctx, songMid, songName)
+		if err == nil && result != nil && result.URL != "" {
+			fm.logger.Info("Got song URL from source",
+				logger.String("source", sourceName),
+				logger.String("song_mid", songMid),
+			)
+			return result, nil
+		}
+		lastErr = err
+		fm.logger.Warn("GetSongURL failed for source",
+			logger.String("source", sourceName),
+			logger.String("song_mid", songMid),
+			logger.String("error", fmt.Sprintf("%v", err)),
+		)
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("all %d sources failed for song %s: %w", len(fm.clients), songMid, lastErr)
+	}
+	return nil, ErrSongNotFound
 }
 
 /* Deprecated: GetSongURLWithFallback is no longer used

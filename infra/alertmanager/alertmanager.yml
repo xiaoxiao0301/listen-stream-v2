@@ -1,0 +1,141 @@
+# AlertManager Configuration for Listen Stream
+# Routes alerts to the right team via Slack or email
+
+global:
+  resolve_timeout: 5m
+
+  # Slack default
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+
+  # Email relay
+  smtp_smarthost:   "smtp.gmail.com:587"
+  smtp_from:        "alerts@listen-stream.com"
+  smtp_auth_username: "${SMTP_USERNAME}"
+  smtp_auth_password: "${SMTP_PASSWORD}"
+
+# ─── Templates ────────────────────────────────────────────────────────────────
+templates:
+  - "/etc/alertmanager/templates/*.tmpl"
+
+# ─── Inhibition Rules ─────────────────────────────────────────────────────────
+# If a service is down, suppress latency/error rate alerts for that same service
+inhibit_rules:
+  - source_matchers:
+      - alertname = "ServiceDown"
+    target_matchers:
+      - alertname =~ "HighErrorRate|CriticalErrorRate|HighP99Latency|CriticalP99Latency"
+    equal: ["service"]
+
+  - source_matchers:
+      - alertname = "PostgreSQLDown"
+    target_matchers:
+      - alertname =~ "PostgreSQL.*"
+
+  - source_matchers:
+      - alertname = "RedisDown"
+    target_matchers:
+      - alertname =~ "Redis.*"
+
+# ─── Route Tree ───────────────────────────────────────────────────────────────
+route:
+  group_by: ["alertname", "service", "severity"]
+  group_wait:      30s    # Wait 30s to group similar alerts
+  group_interval:  5m     # Re-notify every 5m for ongoing alerts
+  repeat_interval: 4h     # Re-send resolved after 4h
+
+  receiver: "slack-default"  # Default receiver
+
+  routes:
+    # ── Critical alerts → immediate Slack + email ────────────────────────────
+    - matchers:
+        - severity = "critical"
+      receiver: "slack-critical"
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true  # Also match parent
+
+    # ── Infrastructure alerts → infra team ──────────────────────────────────
+    - matchers:
+        - team = "infrastructure"
+        - severity = "critical"
+      receiver: "slack-infra"
+      group_wait: 10s
+
+    # ── Backend alerts → backend team ───────────────────────────────────────
+    - matchers:
+        - team = "backend"
+        - severity = "warning"
+      receiver: "slack-backend"
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 6h
+
+    # ── WebSocket alerts → backend team ─────────────────────────────────────
+    - matchers:
+        - alertname =~ "WebSocket.*"
+      receiver: "slack-backend"
+
+# ─── Receivers ────────────────────────────────────────────────────────────────
+receivers:
+  # Default Slack channel
+  - name: "slack-default"
+    slack_configs:
+      - channel: "#alerts"
+        title: "{{ .GroupLabels.alertname }} — {{ .CommonLabels.service }}"
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          *Severity:* {{ .Labels.severity }}
+          *Started:* {{ .StartsAt | since }}
+          {{ end }}
+        send_resolved: true
+
+  # Critical Slack channel
+  - name: "slack-critical"
+    slack_configs:
+      - channel: "#alerts-critical"
+        color: "danger"
+        title: "🚨 CRITICAL: {{ .GroupLabels.alertname }}"
+        text: |
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service }}
+          *Summary:* {{ .Annotations.summary }}
+          *Details:* {{ .Annotations.description }}
+          {{ if .Annotations.runbook }}*Runbook:* {{ .Annotations.runbook }}{{ end }}
+          {{ end }}
+        send_resolved: true
+    email_configs:
+      - to: "oncall@listen-stream.com"
+        subject: "CRITICAL: {{ .GroupLabels.alertname }}"
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Labels: {{ .Labels }}
+          Started: {{ .StartsAt }}
+          {{ end }}
+
+  # Infrastructure team
+  - name: "slack-infra"
+    slack_configs:
+      - channel: "#infra-alerts"
+        title: "🔧 Infra Alert: {{ .GroupLabels.alertname }}"
+        text: |
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+  # Backend team
+  - name: "slack-backend"
+    slack_configs:
+      - channel: "#backend-alerts"
+        title: "⚠️ Backend Alert: {{ .GroupLabels.alertname }}"
+        text: |
+          {{ range .Alerts }}
+          *Service:* {{ .Labels.service }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true

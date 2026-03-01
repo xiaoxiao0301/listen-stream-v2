@@ -1,0 +1,423 @@
+# Listen Stream — Full Infrastructure Docker Compose
+# Phase 7: Consul + OTel/Jaeger + Prometheus/Grafana + ELK
+#
+# Start entire stack:
+#   docker compose -f infra/docker-compose.yml up -d
+#
+# Start infrastructure only (no Go services):
+#   docker compose -f infra/docker-compose.yml up -d \
+#     postgres redis consul-server-1 consul-server-2 consul-server-3 \
+#     otel-collector jaeger prometheus grafana alertmanager \
+#     elasticsearch logstash kibana
+
+name: listen-stream
+
+# ─── Shared networks ──────────────────────────────────────────────────────────
+networks:
+  backend:
+    name: listen-stream-backend
+    driver: bridge
+  monitoring:
+    name: listen-stream-monitoring
+    driver: bridge
+
+# ─── Named volumes ────────────────────────────────────────────────────────────
+volumes:
+  postgres-data:
+  redis-data:
+  consul-server-1-data:
+  consul-server-2-data:
+  consul-server-3-data:
+  prometheus-data:
+  grafana-data:
+  elasticsearch-data:
+  logstash-data:
+
+# ─── Shared healthcheck defaults ──────────────────────────────────────────────
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+services:
+
+  # ══════════════════════════════════════════════════════════
+  # DATA LAYER
+  # ══════════════════════════════════════════════════════════
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: listen-stream-postgres
+    restart: unless-stopped
+    networks: [backend]
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/00-init.sql:ro
+    environment:
+      POSTGRES_DB:       ${POSTGRES_DB:-listen_stream}
+      POSTGRES_USER:     ${POSTGRES_USER:-listen_stream}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-listen_stream_dev_password}
+      PGDATA:            /var/lib/postgresql/data/pgdata
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-listen_stream} -d ${POSTGRES_DB:-listen_stream}"]
+
+  redis:
+    image: redis:7-alpine
+    container_name: listen-stream-redis
+    restart: unless-stopped
+    networks: [backend]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server
+        --save 60 1
+        --loglevel warning
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "redis-cli", "ping"]
+
+  # ══════════════════════════════════════════════════════════
+  # STEP 35: CONSUL CLUSTER (3 nodes)
+  # ══════════════════════════════════════════════════════════
+
+  consul-server-1:
+    image: hashicorp/consul:1.17
+    container_name: listen-stream-consul-1
+    restart: unless-stopped
+    networks: [backend]
+    ports:
+      - "8500:8500"   # HTTP API + UI
+      - "8502:8502"   # gRPC
+      - "8600:8600/udp" # DNS
+    volumes:
+      - consul-server-1-data:/consul/data
+      - ./consul/consul-server.hcl:/consul/config/consul-server.hcl:ro
+    command: >
+      consul agent
+        -config-file=/consul/config/consul-server.hcl
+        -node=consul-server-1
+        -advertise=consul-server-1
+        -retry-join=consul-server-2
+        -retry-join=consul-server-3
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "consul", "members"]
+
+  consul-server-2:
+    image: hashicorp/consul:1.17
+    container_name: listen-stream-consul-2
+    restart: unless-stopped
+    networks: [backend]
+    volumes:
+      - consul-server-2-data:/consul/data
+      - ./consul/consul-server.hcl:/consul/config/consul-server.hcl:ro
+    command: >
+      consul agent
+        -config-file=/consul/config/consul-server.hcl
+        -node=consul-server-2
+        -advertise=consul-server-2
+        -retry-join=consul-server-1
+        -retry-join=consul-server-3
+    depends_on:
+      consul-server-1:
+        condition: service_healthy
+
+  consul-server-3:
+    image: hashicorp/consul:1.17
+    container_name: listen-stream-consul-3
+    restart: unless-stopped
+    networks: [backend]
+    volumes:
+      - consul-server-3-data:/consul/data
+      - ./consul/consul-server.hcl:/consul/config/consul-server.hcl:ro
+    command: >
+      consul agent
+        -config-file=/consul/config/consul-server.hcl
+        -node=consul-server-3
+        -advertise=consul-server-3
+        -retry-join=consul-server-1
+        -retry-join=consul-server-2
+    depends_on:
+      consul-server-1:
+        condition: service_healthy
+
+  # Init KV: runs once, loads default configs into Consul KV
+  consul-init:
+    image: curlimages/curl:latest
+    container_name: listen-stream-consul-init
+    networks: [backend]
+    volumes:
+      - ./consul/init-kv.sh:/init-kv.sh:ro
+    entrypoint: ["/bin/sh", "/init-kv.sh", "http://consul-server-1:8500"]
+    depends_on:
+      consul-server-1:
+        condition: service_healthy
+    restart: "no"
+
+  # ══════════════════════════════════════════════════════════
+  # STEP 36: OPENTELEMETRY + JAEGER
+  # ══════════════════════════════════════════════════════════
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.106.1
+    container_name: listen-stream-otel-collector
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Collector self-metrics
+      - "8889:8889"   # Prometheus exporter (scraped by Prometheus)
+      - "13133:13133" # Health check
+      - "55679:55679" # zPages debug
+    volumes:
+      - ./otel/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    command: ["--config=/etc/otel-collector.yaml"]
+    environment:
+      DEPLOYMENT_ENV: ${ENVIRONMENT:-development}
+    depends_on:
+      jaeger:
+        condition: service_started
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:13133/"]
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    container_name: listen-stream-jaeger
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14269:14269"   # Admin/metrics
+      - "14317:4317"    # OTLP gRPC (collector → Jaeger)
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: "memory"        # Use badger/cassandra/ES for production
+      JAEGER_DISABLED: "false"
+      LOG_LEVEL: "error"
+
+  # ══════════════════════════════════════════════════════════
+  # STEP 37: PROMETHEUS + GRAFANA + ALERTMANAGER
+  # ══════════════════════════════════════════════════════════
+
+  prometheus:
+    image: prom/prometheus:v2.53.2
+    container_name: listen-stream-prometheus
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+      - "--log.level=warn"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: listen-stream-grafana
+    restart: unless-stopped
+    networks: [monitoring]
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_USER:     ${GF_SECURITY_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-listen_stream_admin_2026}
+      GF_USERS_ALLOW_SIGN_UP:     "false"
+      GF_INSTALL_PLUGINS:         "grafana-clock-panel,grafana-piechart-panel,grafana-worldmap-panel"
+      GF_UNIFIED_ALERTING_ENABLED: "true"
+      GF_ALERTING_ENABLED:         "false"
+      GF_LOG_LEVEL:                "warn"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health"]
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: listen-stream-alertmanager
+    restart: unless-stopped
+    networks: [monitoring]
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--log.level=warn"
+    environment:
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-}
+      SMTP_USERNAME:     ${SMTP_USERNAME:-}
+      SMTP_PASSWORD:     ${SMTP_PASSWORD:-}
+
+  # ── Exporters (connect data sources to Prometheus) ────────────────────────
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: listen-stream-postgres-exporter
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "9187:9187"
+    environment:
+      DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER:-listen_stream}:${POSTGRES_PASSWORD:-listen_stream_dev_password}@postgres:5432/${POSTGRES_DB:-listen_stream}?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: listen-stream-redis-exporter
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "9121:9121"
+    environment:
+      REDIS_ADDR: "redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: listen-stream-node-exporter
+    restart: unless-stopped
+    networks: [monitoring]
+    ports:
+      - "9100:9100"
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|run)($$|/)"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+
+  # ══════════════════════════════════════════════════════════
+  # STEP 38: ELK STACK (Elasticsearch + Logstash + Kibana)
+  # ══════════════════════════════════════════════════════════
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.0
+    container_name: listen-stream-elasticsearch
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    volumes:
+      - elasticsearch-data:/usr/share/elasticsearch/data
+      - ./elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    environment:
+      ES_JAVA_OPTS:             ${ES_JAVA_OPTS:--Xms512m -Xmx512m}
+      discovery.type:           single-node
+      xpack.security.enabled:   "false"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -v '\"status\":\"red\"'"]
+      start_period: 60s
+
+  # Init Elasticsearch: apply ILM policy and index templates
+  elasticsearch-init:
+    image: curlimages/curl:latest
+    container_name: listen-stream-elasticsearch-init
+    networks: [backend]
+    volumes:
+      - ./elasticsearch/init-elasticsearch.sh:/init-elasticsearch.sh:ro
+    entrypoint: ["/bin/sh", "/init-elasticsearch.sh", "http://elasticsearch:9200"]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.14.0
+    container_name: listen-stream-logstash
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "5044:5044"   # Beats input
+      - "5000:5000/tcp"   # TCP JSON input
+      - "5000:5000/udp"   # UDP input
+      - "9600:9600"   # Logstash monitoring API
+    volumes:
+      - logstash-data:/usr/share/logstash/data
+      - ./logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    environment:
+      LS_JAVA_OPTS:    ${LS_JAVA_OPTS:--Xms256m -Xmx256m}
+      LOGSTASH_DEBUG:  ${LOGSTASH_DEBUG:-false}
+      ENVIRONMENT:     ${ENVIRONMENT:-development}
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-sf", "http://localhost:9600/_node/stats"]
+      start_period: 60s
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.14.0
+    container_name: listen-stream-kibana
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "5601:5601"
+    volumes:
+      - ./kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    environment:
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -v '\"level\":\"critical\"'"]
+      start_period: 60s
+
+  elasticsearch-exporter:
+    image: prometheuscommunity/elasticsearch-exporter:v1.7.0
+    container_name: listen-stream-elasticsearch-exporter
+    restart: unless-stopped
+    networks: [backend, monitoring]
+    ports:
+      - "9114:9114"
+    command:
+      - "--es.uri=http://elasticsearch:9200"
+      - "--es.all=false"
+      - "--es.indices=true"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy

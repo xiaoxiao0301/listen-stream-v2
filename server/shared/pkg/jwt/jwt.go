@@ -9,12 +9,21 @@ import (
 	"github.com/xiaoxiao0301/listen-stream-v2/server/shared/pkg/errors"
 )
 
+// TokenType distinguishes access tokens from refresh tokens.
+type TokenType string
+
+const (
+	TokenTypeAccess  TokenType = "access"
+	TokenTypeRefresh TokenType = "refresh"
+)
+
 // Claims represents JWT claims.
 type Claims struct {
-	UserID       string `json:"user_id"`
-	DeviceID     string `json:"device_id"`
-	TokenVersion int    `json:"token_version"`
-	ClientIP     string `json:"client_ip,omitempty"` // Optional: for IP binding
+	UserID       string    `json:"user_id"`
+	DeviceID     string    `json:"device_id"`
+	TokenVersion int       `json:"token_version"`
+	TokenType    TokenType `json:"token_type"` // "access" or "refresh"
+	ClientIP     string    `json:"client_ip,omitempty"` // Optional: for IP binding
 	jwt.RegisteredClaims
 }
 
@@ -61,6 +70,7 @@ func (m *Manager) GenerateToken(userID, deviceID string, tokenVersion int, clien
 		UserID:       userID,
 		DeviceID:     deviceID,
 		TokenVersion: tokenVersion,
+		TokenType:    TokenTypeAccess,
 		ClientIP:     clientIP,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.issuer,
@@ -87,6 +97,7 @@ func (m *Manager) GenerateRefreshToken(userID, deviceID string, tokenVersion int
 		UserID:       userID,
 		DeviceID:     deviceID,
 		TokenVersion: tokenVersion,
+		TokenType:    TokenTypeRefresh,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    m.issuer,
 			Subject:   userID,
@@ -105,8 +116,34 @@ func (m *Manager) GenerateRefreshToken(userID, deviceID string, tokenVersion int
 	return tokenString, nil
 }
 
-// ValidateToken validates a token and returns its claims.
+// ValidateToken validates an access token and returns its claims.
+// Returns an error if the token is a refresh token (prevents token substitution attacks).
 func (m *Manager) ValidateToken(tokenString string) (*Claims, error) {
+	claims, err := m.parseToken(tokenString)
+	if err != nil {
+		return nil, err
+	}
+	if claims.TokenType != TokenTypeAccess {
+		return nil, errors.ErrTokenInvalid
+	}
+	return claims, nil
+}
+
+// ValidateRefreshToken validates a refresh token and returns its claims.
+// Returns an error if the token is an access token (prevents token substitution attacks).
+func (m *Manager) ValidateRefreshToken(tokenString string) (*Claims, error) {
+	claims, err := m.parseToken(tokenString)
+	if err != nil {
+		return nil, err
+	}
+	if claims.TokenType != TokenTypeRefresh {
+		return nil, errors.ErrTokenInvalid
+	}
+	return claims, nil
+}
+
+// parseToken parses and validates a JWT without checking the token type.
+func (m *Manager) parseToken(tokenString string) (*Claims, error) {
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		// Verify signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -114,26 +151,17 @@ func (m *Manager) ValidateToken(tokenString string) (*Claims, error) {
 		}
 		return m.secret, nil
 	})
-	
 	if err != nil {
 		return nil, errors.ErrTokenInvalid.WithError(err)
 	}
-	
 	if !token.Valid {
 		return nil, errors.ErrTokenInvalid
 	}
-	
 	claims, ok := token.Claims.(*Claims)
 	if !ok {
 		return nil, errors.ErrTokenInvalid
 	}
-	
 	return claims, nil
-}
-
-// ValidateRefreshToken validates a refresh token.
-func (m *Manager) ValidateRefreshToken(tokenString string) (*Claims, error) {
-	return m.ValidateToken(tokenString)
 }
 
 // ExtractClaims extracts claims without validation (for debugging).

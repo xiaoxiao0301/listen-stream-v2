@@ -239,3 +239,92 @@ init: install-tools proto-gen deps ## Initialize project (install tools, generat
 	@echo "  1. Start services: docker-compose -f docker-compose.local.yml up -d"
 	@echo "  2. Run migrations: make migrate-up DATABASE_URL=postgresql://postgres:postgres123@localhost:5432/listen_stream?sslmode=disable"
 	@echo "  3. Start a service: make run-auth"
+
+##@ Infrastructure (Phase 7)
+
+INFRA_DIR := infra
+INFRA_COMPOSE := $(INFRA_DIR)/docker-compose.yml
+SERVICES_COMPOSE := $(INFRA_DIR)/docker-compose.services.yml
+
+infra-up: ## Start full infrastructure (Consul + OTel/Jaeger + Prometheus/Grafana + ELK)
+	@echo "$(COLOR_GREEN)Starting Listen Stream infrastructure...$(COLOR_RESET)"
+	@cp -n $(INFRA_DIR)/.env.example $(INFRA_DIR)/.env 2>/dev/null || true
+	@docker compose -f $(INFRA_COMPOSE) --env-file $(INFRA_DIR)/.env up -d
+	@echo ""
+	@echo "$(COLOR_GREEN)✓ Infrastructure started$(COLOR_RESET)"
+	@echo ""
+	@echo "$(COLOR_BOLD)Service URLs:$(COLOR_RESET)"
+	@echo "  Consul UI:    http://localhost:8500"
+	@echo "  Jaeger UI:    http://localhost:16686"
+	@echo "  Prometheus:   http://localhost:9090"
+	@echo "  Grafana:      http://localhost:3000  (admin / listen_stream_admin_2026)"
+	@echo "  AlertManager: http://localhost:9093"
+	@echo "  Kibana:       http://localhost:5601"
+	@echo "  Elasticsearch:http://localhost:9200"
+
+infra-down: ## Stop all infrastructure containers
+	@echo "$(COLOR_YELLOW)Stopping infrastructure...$(COLOR_RESET)"
+	@docker compose -f $(INFRA_COMPOSE) down
+	@echo "$(COLOR_GREEN)✓ Infrastructure stopped$(COLOR_RESET)"
+
+infra-clean: ## Stop and remove all infrastructure data (DESTRUCTIVE)
+	@echo "$(COLOR_YELLOW)WARNING: This will delete all infrastructure data!$(COLOR_RESET)"
+	@read -p "Are you sure? [y/N] " confirm && [ "$$confirm" = "y" ] || exit 1
+	@docker compose -f $(INFRA_COMPOSE) down -v --remove-orphans
+	@echo "$(COLOR_GREEN)✓ Infrastructure data cleaned$(COLOR_RESET)"
+
+infra-logs: ## Tail logs from all infrastructure containers
+	@docker compose -f $(INFRA_COMPOSE) logs -f --tail=50
+
+infra-status: ## Show status of all infrastructure containers
+	@docker compose -f $(INFRA_COMPOSE) ps
+
+infra-consul-status: ## Show Consul cluster members
+	@echo "$(COLOR_GREEN)Consul cluster members:$(COLOR_RESET)"
+	@docker exec listen-stream-consul-1 consul members
+
+infra-consul-kv: ## List all Consul KV keys
+	@docker exec listen-stream-consul-1 consul kv get -recurse listen-stream/
+
+infra-consul-reinit: ## Re-run Consul KV initialization
+	@echo "$(COLOR_GREEN)Re-initializing Consul KV...$(COLOR_RESET)"
+	@docker run --rm --network listen-stream-backend \
+		-v $(PWD)/$(INFRA_DIR)/consul/init-kv.sh:/init-kv.sh \
+		curlimages/curl:latest /bin/sh /init-kv.sh http://consul-server-1:8500
+	@echo "$(COLOR_GREEN)✓ Consul KV re-initialized$(COLOR_RESET)"
+
+infra-es-status: ## Show Elasticsearch cluster health
+	@curl -s http://localhost:9200/_cluster/health | python3 -m json.tool 2>/dev/null || \
+		curl -s http://localhost:9200/_cluster/health
+
+infra-es-indices: ## List Elasticsearch indices
+	@curl -s http://localhost:9200/_cat/indices?v
+
+infra-prometheus-reload: ## Reload Prometheus configuration
+	@curl -s -X POST http://localhost:9090/-/reload
+	@echo "$(COLOR_GREEN)✓ Prometheus configuration reloaded$(COLOR_RESET)"
+
+services-up: ## Start Go services (requires infra to be running)
+	@echo "$(COLOR_GREEN)Starting Go services...$(COLOR_RESET)"
+	@docker compose \
+		-f $(INFRA_COMPOSE) \
+		-f $(SERVICES_COMPOSE) \
+		--env-file $(INFRA_DIR)/.env \
+		up -d auth-svc proxy-svc user-svc sync-svc admin-svc
+	@echo "$(COLOR_GREEN)✓ Go services started$(COLOR_RESET)"
+
+services-down: ## Stop Go services
+	@docker compose \
+		-f $(INFRA_COMPOSE) \
+		-f $(SERVICES_COMPOSE) \
+		down auth-svc proxy-svc user-svc sync-svc admin-svc
+
+up: infra-up services-up ## Start everything (infra + services)
+	@echo "$(COLOR_GREEN)✓ Full stack started$(COLOR_RESET)"
+
+down: ## Stop everything
+	@docker compose \
+		-f $(INFRA_COMPOSE) \
+		-f $(SERVICES_COMPOSE) \
+		down
+

@@ -1,0 +1,36 @@
+# Kibana Configuration for Listen Stream
+server.name: kibana
+server.host: "0.0.0.0"
+server.port: 5601
+
+# Elasticsearch connection
+elasticsearch.hosts: ["http://elasticsearch:9200"]
+elasticsearch.requestTimeout: 30000
+
+# Security (disabled for development)
+xpack.security.enabled: false
+
+# Monitoring
+xpack.monitoring.enabled: true
+xpack.monitoring.ui.enabled: true
+
+# Saved objects
+uiSettings.overrides:
+  "defaultIndex": "listen-stream-logs-*"
+  "timepicker:timeDefaults": '{ "from": "now-1h", "to": "now" }'
+  "discover:sampleSize": 500
+
+# Telemetry
+telemetry.enabled: false
+telemetry.optIn: false
+
+# Logging
+logging.appenders:
+  console:
+    type: console
+    layout:
+      type: pattern
+
+logging.root:
+  level: warn
+  appenders: [console]
